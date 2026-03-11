@@ -9,7 +9,7 @@
 #
 # When running outside a devcontainer:
 #   - Uses pre-built angzarr-go image from ghcr.io/angzarr
-#   - Podman mounts justfile.container as /workspace/client/go/justfile
+#   - Podman mounts justfile.container as /workspace/justfile
 #
 # When running inside a devcontainer (DEVCONTAINER=true):
 #   - Commands execute directly via `just <target>`
@@ -17,7 +17,7 @@
 
 set shell := ["bash", "-c"]
 
-TOP := `git rev-parse --show-toplevel`
+ROOT := `git rev-parse --show-toplevel`
 IMAGE := "ghcr.io/angzarr-io/angzarr-go:latest"
 
 # Run just target in container (or directly if already in devcontainer)
@@ -28,9 +28,9 @@ _container +ARGS:
         just {{ARGS}}
     else
         podman run --rm --network=host \
-            -v "{{TOP}}:/workspace:Z" \
-            -v "{{TOP}}/client/go/justfile.container:/workspace/client/go/justfile:ro" \
-            -w /workspace/client/go \
+            -v "{{ROOT}}:/workspace:Z" \
+            -v "{{ROOT}}/justfile.container:/workspace/justfile:ro" \
+            -w /workspace \
             -e DEVCONTAINER=true \
             {{IMAGE}} just {{ARGS}}
     fi
@@ -57,7 +57,7 @@ coverage:
 # Show coverage in browser (host only)
 coverage-html:
     just _container coverage
-    go tool cover -html="{{TOP}}/client/go/coverage.out"
+    go tool cover -html="{{ROOT}}/coverage.out"
 
 mutate:
     just _container mutate
@@ -66,4 +66,4 @@ mutate-dry:
     just _container mutate-dry
 
 clean:
-    rm -f "{{TOP}}/client/go/coverage.out"
+    rm -f "{{ROOT}}/coverage.out"
