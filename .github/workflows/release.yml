@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    container: ghcr.io/angzarr-io/angzarr-go:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure git safe directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build
+        run: just build
+
+      - name: Test
+        run: just test
+
+      - name: Create release notes
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          cat << EOF > release-notes.md
+          ## Go Client v${VERSION}
+
+          ### Installation
+
+          \`\`\`bash
+          go get github.com/${{ github.repository }}@v${VERSION}
+          \`\`\`
+
+          ### Usage
+
+          \`\`\`go
+          import angzarr "github.com/${{ github.repository }}"
+
+          client, err := angzarr.NewClient("localhost:1310")
+          if err != nil {
+              log.Fatal(err)
+          }
+          defer client.Close()
+          \`\`\`
+          EOF
+
+      # Go modules auto-discover from tags, no explicit publish needed
+      # Uncomment to create GitHub release
+      # - name: Create GitHub Release
+      #   uses: softprops/action-gh-release@v1
+      #   with:
+      #     body_path: release-notes.md
+      #     draft: false
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
