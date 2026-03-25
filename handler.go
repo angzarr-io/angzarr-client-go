@@ -329,12 +329,31 @@ func RunTraitSagaServer(name, defaultPort string, router *SagaRouter) {
 // TraitProcessManagerHandler wraps a ProcessManagerRouter for the gRPC ProcessManager service.
 type TraitProcessManagerHandler[S any] struct {
 	pb.UnimplementedProcessManagerServiceServer
-	router *ProcessManagerRouter[S]
+	router   *ProcessManagerRouter[S]
+	replayFn PMReplayFunc
 }
 
 // NewTraitProcessManagerHandler creates a new process manager handler.
 func NewTraitProcessManagerHandler[S any](router *ProcessManagerRouter[S]) *TraitProcessManagerHandler[S] {
 	return &TraitProcessManagerHandler[S]{router: router}
+}
+
+// WithReplay sets the replay callback for state reconstruction.
+func (h *TraitProcessManagerHandler[S]) WithReplay(fn PMReplayFunc) *TraitProcessManagerHandler[S] {
+	h.replayFn = fn
+	return h
+}
+
+// Replay rebuilds PM state from events and packs it into Any.
+func (h *TraitProcessManagerHandler[S]) Replay(ctx context.Context, req *pb.ProcessManagerReplayRequest) (*pb.ProcessManagerReplayResponse, error) {
+	if h.replayFn != nil {
+		state, err := h.replayFn(req.Events)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		return &pb.ProcessManagerReplayResponse{State: state}, nil
+	}
+	return &pb.ProcessManagerReplayResponse{}, nil
 }
 
 // Prepare declares which additional destinations are needed.
@@ -471,6 +490,10 @@ func RunProjectorServer(name, defaultPort string, handler *ProjectorHandler) {
 	})
 }
 
+// PMReplayFunc rebuilds PM state from events and packs it into Any.
+// Called by framework before Prepare/Handle to convert EventBook to typed state.
+type PMReplayFunc func(processState *pb.EventBook) (*anypb.Any, error)
+
 // PMPrepareFunc declares additional destinations needed beyond the trigger.
 type PMPrepareFunc func(trigger, processState *pb.EventBook) []*pb.Cover
 
@@ -495,6 +518,7 @@ type PMRevocationFunc func(notification *pb.Notification, processState *pb.Event
 type ProcessManagerHandler struct {
 	pb.UnimplementedProcessManagerServiceServer
 	name         string
+	replayFn     PMReplayFunc
 	prepareFn    PMPrepareFunc
 	handleFn     PMHandleFunc
 	revocationFn PMRevocationFunc
@@ -505,6 +529,12 @@ func NewProcessManagerHandler(name string) *ProcessManagerHandler {
 	return &ProcessManagerHandler{
 		name: name,
 	}
+}
+
+// WithReplay sets the replay callback for state reconstruction.
+func (h *ProcessManagerHandler) WithReplay(fn PMReplayFunc) *ProcessManagerHandler {
+	h.replayFn = fn
+	return h
 }
 
 // WithPrepare sets the prepare callback.
@@ -531,6 +561,18 @@ func (h *ProcessManagerHandler) WithHandle(fn PMHandleFunc) *ProcessManagerHandl
 func (h *ProcessManagerHandler) WithRevocationHandler(fn PMRevocationFunc) *ProcessManagerHandler {
 	h.revocationFn = fn
 	return h
+}
+
+// Replay rebuilds PM state from events and packs it into Any.
+func (h *ProcessManagerHandler) Replay(ctx context.Context, req *pb.ProcessManagerReplayRequest) (*pb.ProcessManagerReplayResponse, error) {
+	if h.replayFn != nil {
+		state, err := h.replayFn(req.Events)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		return &pb.ProcessManagerReplayResponse{State: state}, nil
+	}
+	return &pb.ProcessManagerReplayResponse{}, nil
 }
 
 // Prepare declares which additional destinations are needed.
@@ -737,6 +779,9 @@ type OOProcessManager interface {
 	Name() string
 	PMDomain() string
 	InputDomains() []string
+	// ReplayState rebuilds PM state from events and packs it into Any.
+	// Called by framework before Prepare/Handle to convert EventBook to typed state.
+	ReplayState(processState *pb.EventBook) (*anypb.Any, error)
 	PrepareDestinations(trigger, processState *pb.EventBook) []*pb.Cover
 	Handle(trigger, processState *pb.EventBook, destinations []*pb.EventBook) ([]*pb.CommandBook, *pb.EventBook, *pb.Notification, error)
 }
@@ -750,6 +795,16 @@ type OOProcessManagerHandler struct {
 // NewOOProcessManagerHandler creates a new OO process manager handler.
 func NewOOProcessManagerHandler(pm OOProcessManager) *OOProcessManagerHandler {
 	return &OOProcessManagerHandler{pm: pm}
+}
+
+// Replay rebuilds PM state from events and packs it into Any.
+// Called by framework before Prepare/Handle to convert EventBook to typed state.
+func (h *OOProcessManagerHandler) Replay(ctx context.Context, req *pb.ProcessManagerReplayRequest) (*pb.ProcessManagerReplayResponse, error) {
+	state, err := h.pm.ReplayState(req.Events)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &pb.ProcessManagerReplayResponse{State: state}, nil
 }
 
 // Prepare declares which additional destinations are needed.

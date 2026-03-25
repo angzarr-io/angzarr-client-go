@@ -41,7 +41,8 @@ type pmPrepareOOFunc[S any] func(trigger *pb.EventBook, state S, eventAny *anypb
 
 // pmHandlerOOFunc is an internal type for event handlers.
 // Returns commands and optionally PM events.
-type pmHandlerOOFunc[S any] func(trigger *pb.EventBook, state S, eventAny *anypb.Any, dests []*pb.EventBook) ([]*pb.CommandBook, *pb.EventBook, error)
+// Receives Destinations with auto-rebuilt state from registered StateRouters.
+type pmHandlerOOFunc[S any] func(trigger *pb.EventBook, state S, eventAny *anypb.Any, dests *Destinations) ([]*pb.CommandBook, *pb.EventBook, error)
 
 // pmApplierOOFunc is an internal type for state appliers.
 // Mutates state based on a PM event.
@@ -51,21 +52,27 @@ type pmApplierOOFunc[S any] func(state S, eventAny *anypb.Any)
 // Returns RejectionHandlerResponse with events and/or notification.
 type pmRejectionOOFunc[S any] func(state S, notification *pb.Notification) *RejectionHandlerResponse
 
+// PMStatePacker converts PM state to protobuf Any for Replay RPC.
+type PMStatePacker[S any] func(state S) (*anypb.Any, error)
+
 // ProcessManagerBase provides OO-style process manager infrastructure.
 //
 // Embed this in your PM struct and call Init() to set up the base.
 // Then register handlers with Prepares(), Handles(), and Applies().
+// Register destination routers with WithDestination() for auto-rebuilding.
 //
 // Type parameter S is the PM state type (should be a pointer type like *PMState).
 type ProcessManagerBase[S any] struct {
-	name         string
-	pmDomain     string
-	inputDomains []string
-	stateFactory func() S
-	prepares     map[string]pmPrepareOOFunc[S]
-	handlers     map[string]pmHandlerOOFunc[S]
-	appliers     map[string]pmApplierOOFunc[S]
-	rejections   map[string]pmRejectionOOFunc[S]
+	name               string
+	pmDomain           string
+	inputDomains       []string
+	stateFactory       func() S
+	statePacker        PMStatePacker[S]
+	prepares           map[string]pmPrepareOOFunc[S]
+	handlers           map[string]pmHandlerOOFunc[S]
+	appliers           map[string]pmApplierOOFunc[S]
+	rejections         map[string]pmRejectionOOFunc[S]
+	destinationRouters map[string]DestinationRebuilder
 }
 
 // Init initializes the process manager base with name and domain configuration.
@@ -86,12 +93,37 @@ func (pm *ProcessManagerBase[S]) Init(name, pmDomain string, inputDomains []stri
 	pm.handlers = make(map[string]pmHandlerOOFunc[S])
 	pm.appliers = make(map[string]pmApplierOOFunc[S])
 	pm.rejections = make(map[string]pmRejectionOOFunc[S])
+	pm.destinationRouters = make(map[string]DestinationRebuilder)
+}
+
+// WithDestination registers a StateRouter for automatic destination state rebuilding.
+//
+// When destinations are received in Handle, the registered router will rebuild
+// state from the EventBook. Use GetDestination[T] in handlers for typed access.
+//
+// Example:
+//
+//	pm.WithDestination("table", tableStateRouter)
+func (pm *ProcessManagerBase[S]) WithDestination(domain string, router DestinationRebuilder) {
+	pm.destinationRouters[domain] = router
 }
 
 // WithStateFactory sets the factory function for creating new state instances.
 // Required for state reconstruction from events.
 func (pm *ProcessManagerBase[S]) WithStateFactory(factory func() S) {
 	pm.stateFactory = factory
+}
+
+// WithStatePacker sets the function for packing state into protobuf Any.
+// Required for Replay RPC to return typed state to the framework.
+//
+// Example:
+//
+//	pm.WithStatePacker(func(state *PMState) (*anypb.Any, error) {
+//	    return anypb.New(state.ToProto())
+//	})
+func (pm *ProcessManagerBase[S]) WithStatePacker(packer PMStatePacker[S]) {
+	pm.statePacker = packer
 }
 
 // Name returns the PM's name.
@@ -187,6 +219,7 @@ func (pm *ProcessManagerBase[S]) Prepares(handler any) {
 //  2. With destinations: func(trigger, state, event, dests) (cmds, pmEvents, error)
 //
 // The event type is automatically extracted via proto reflection.
+// Destinations are automatically rebuilt from EventBooks using registered StateRouters.
 //
 // Example:
 //
@@ -196,8 +229,10 @@ func (pm *ProcessManagerBase[S]) Prepares(handler any) {
 //	    trigger *pb.EventBook,
 //	    state *PMState,
 //	    event *examples.HandStarted,
-//	    dests []*pb.EventBook,
+//	    dests *Destinations,
 //	) ([]*pb.CommandBook, *pb.EventBook, error) {
+//	    // Get rebuilt table state
+//	    tableState := GetDestination[*TableState](dests, "table")
 //	    // Process event and return commands
 //	    return cmds, nil, nil
 //	}
@@ -232,7 +267,7 @@ func (pm *ProcessManagerBase[S]) Handles(handler any) {
 	withDests := numIn == 4
 
 	// Create the wrapper function
-	wrapper := func(trigger *pb.EventBook, state S, eventAny *anypb.Any, dests []*pb.EventBook) ([]*pb.CommandBook, *pb.EventBook, error) {
+	wrapper := func(trigger *pb.EventBook, state S, eventAny *anypb.Any, dests *Destinations) ([]*pb.CommandBook, *pb.EventBook, error) {
 		// Create a new instance of the event type
 		eventPtr := reflect.New(eventType)
 		event := eventPtr.Interface().(proto.Message)
@@ -421,6 +456,20 @@ func (pm *ProcessManagerBase[S]) RebuildState(processState *pb.EventBook) S {
 	return state
 }
 
+// ReplayState rebuilds PM state from events and packs it into Any.
+// Called by framework before Prepare/Handle to convert EventBook to typed state.
+// Implements the OOProcessManager interface.
+func (pm *ProcessManagerBase[S]) ReplayState(processState *pb.EventBook) (*anypb.Any, error) {
+	state := pm.RebuildState(processState)
+
+	if pm.statePacker != nil {
+		return pm.statePacker(state)
+	}
+
+	// No packer configured - return empty Any
+	return &anypb.Any{}, nil
+}
+
 // PrepareDestinations returns the destination covers needed for the given trigger.
 // Called during the Prepare phase of the two-phase PM protocol.
 func (pm *ProcessManagerBase[S]) PrepareDestinations(trigger, processState *pb.EventBook) []*pb.Cover {
@@ -453,12 +502,16 @@ func (pm *ProcessManagerBase[S]) PrepareDestinations(trigger, processState *pb.E
 // Called during the Handle phase of the two-phase PM protocol.
 //
 // Detects Notification (rejection) payloads and routes to rejection handlers.
+// Destinations are auto-rebuilt from EventBooks using registered StateRouters.
 func (pm *ProcessManagerBase[S]) Handle(trigger, processState *pb.EventBook, destinations []*pb.EventBook) ([]*pb.CommandBook, *pb.EventBook, *pb.Notification, error) {
 	if trigger == nil || len(trigger.Pages) == 0 {
 		return nil, nil, nil, nil
 	}
 
 	state := pm.RebuildState(processState)
+
+	// Rebuild destinations from EventBooks using registered routers
+	rebuiltDestinations := FromEventBooks(destinations, pm.destinationRouters)
 
 	var commands []*pb.CommandBook
 	var allPMEvents []*pb.EventPage
@@ -488,7 +541,7 @@ func (pm *ProcessManagerBase[S]) Handle(trigger, processState *pb.EventBook, des
 
 		for fullName, handler := range pm.handlers {
 			if typeURL == TypeURLPrefix+fullName {
-				cmds, pmEvents, err := handler(trigger, state, event, destinations)
+				cmds, pmEvents, err := handler(trigger, state, event, rebuiltDestinations)
 				if err != nil {
 					return nil, nil, nil, err
 				}
