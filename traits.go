@@ -106,6 +106,12 @@ type CommandHandlerDomainHandler[S any] interface {
 // Sagas translate events from one domain into commands for another.
 // They are stateless -- each event is processed independently.
 //
+// Design Philosophy:
+// - Sagas are translators, NOT decision makers
+// - They should NOT rebuild destination state to make business decisions
+// - Business logic belongs in aggregates
+// - Destinations provide only sequences for command stamping
+//
 // Example:
 //
 //	type OrderSagaHandler struct{}
@@ -114,32 +120,26 @@ type CommandHandlerDomainHandler[S any] interface {
 //	    return []string{"examples.OrderCompleted", "examples.OrderCancelled"}
 //	}
 //
-//	func (h *OrderSagaHandler) Prepare(source *pb.EventBook, event *anypb.Any) []*pb.Cover {
-//	    // Declare needed destinations
-//	}
-//
 //	func (h *OrderSagaHandler) Execute(
 //	    source *pb.EventBook,
 //	    event *anypb.Any,
-//	    destinations []*pb.EventBook,
+//	    destinations *Destinations,
 //	) (*SagaHandlerResponse, error) {
-//	    // Produce commands and/or events
+//	    cmd := NewCommandBook("fulfillment", &CreateShipment{...})
+//	    destinations.StampCommand(cmd, "fulfillment")
+//	    return &SagaHandlerResponse{Commands: []*pb.CommandBook{cmd}}, nil
 //	}
 type SagaDomainHandler interface {
 	// EventTypes returns the fully-qualified event type names this handler processes.
 	// Used for subscription derivation.
 	EventTypes() []string
 
-	// Prepare declares destination covers needed.
-	// Called before Execute to fetch destination aggregate state.
-	Prepare(source *pb.EventBook, event *anypb.Any) []*pb.Cover
-
 	// Execute produces commands and/or events.
-	// Called with source event and fetched destination state.
+	// Called with source event and destination sequences for command stamping.
 	Execute(
 		source *pb.EventBook,
 		event *anypb.Any,
-		destinations []*pb.EventBook,
+		destinations *Destinations,
 	) (*SagaHandlerResponse, error)
 
 	// OnRejected handles a rejection notification.
@@ -162,6 +162,12 @@ type SagaDomainHandler interface {
 // their own state. Each domain gets its own handler, but they all share
 // the same PM state type.
 //
+// Design Philosophy:
+// - PMs are coordinators, NOT decision makers
+// - They should NOT rebuild destination state to make business decisions
+// - Business logic belongs in aggregates
+// - Destinations provide only sequences for command stamping
+//
 // Example:
 //
 //	type OrderPmHandler struct{}
@@ -170,35 +176,27 @@ type SagaDomainHandler interface {
 //	    return []string{"examples.OrderCreated"}
 //	}
 //
-//	func (h *OrderPmHandler) Prepare(
-//	    trigger *pb.EventBook,
-//	    state *HandFlowState,
-//	    event *anypb.Any,
-//	) []*pb.Cover {
-//	    // Declare needed destinations
-//	}
-//
 //	func (h *OrderPmHandler) Handle(
 //	    trigger *pb.EventBook,
 //	    state *HandFlowState,
 //	    event *anypb.Any,
-//	    destinations []*pb.EventBook,
+//	    destinations *Destinations,
 //	) (*ProcessManagerResponse, error) {
-//	    // Process event, emit commands and/or PM events
+//	    cmd := NewCommandBook("fulfillment", &CreateShipment{...})
+//	    destinations.StampCommand(cmd, "fulfillment")
+//	    return &ProcessManagerResponse{Commands: []*pb.CommandBook{cmd}}, nil
 //	}
 type ProcessManagerDomainHandler[S any] interface {
 	// EventTypes returns the fully-qualified event type names this handler processes.
 	EventTypes() []string
 
-	// Prepare declares destination covers needed.
-	Prepare(trigger *pb.EventBook, state S, event *anypb.Any) []*pb.Cover
-
 	// Handle processes the event and produces commands and PM events.
+	// Destinations provide sequences for command stamping (not EventBook data).
 	Handle(
 		trigger *pb.EventBook,
 		state S,
 		event *anypb.Any,
-		destinations []*pb.EventBook,
+		destinations *Destinations,
 	) (*ProcessManagerResponse, error)
 
 	// OnRejected handles a rejection notification.

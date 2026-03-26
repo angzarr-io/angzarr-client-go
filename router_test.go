@@ -124,7 +124,7 @@ func TestEventRouter_Dispatch(t *testing.T) {
 		// Use fully qualified type name for reflection-based matching
 		router := NewEventRouter("saga-test").
 			Domain("source").
-			On("examples.TestEvent", func(source *pb.EventBook, event *anypb.Any, destinations []*pb.EventBook) ([]*pb.CommandBook, error) {
+			On("examples.TestEvent", func(source *pb.EventBook, event *anypb.Any, destinations *Destinations) ([]*pb.CommandBook, error) {
 				called = true
 				return []*pb.CommandBook{{}}, nil
 			})
@@ -156,11 +156,11 @@ func TestEventRouter_Dispatch(t *testing.T) {
 		callCount := 0
 		router := NewEventRouter("saga-test").
 			Domain("source").
-			On("examples.Event1", func(source *pb.EventBook, event *anypb.Any, destinations []*pb.EventBook) ([]*pb.CommandBook, error) {
+			On("examples.Event1", func(source *pb.EventBook, event *anypb.Any, destinations *Destinations) ([]*pb.CommandBook, error) {
 				callCount++
 				return []*pb.CommandBook{{}}, nil
 			}).
-			On("examples.Event2", func(source *pb.EventBook, event *anypb.Any, destinations []*pb.EventBook) ([]*pb.CommandBook, error) {
+			On("examples.Event2", func(source *pb.EventBook, event *anypb.Any, destinations *Destinations) ([]*pb.CommandBook, error) {
 				callCount++
 				return []*pb.CommandBook{{}, {}}, nil
 			})
@@ -188,7 +188,7 @@ func TestEventRouter_Dispatch(t *testing.T) {
 	t.Run("skips unmatched events", func(t *testing.T) {
 		router := NewEventRouter("saga-test").
 			Domain("source").
-			On("examples.KnownEvent", func(source *pb.EventBook, event *anypb.Any, destinations []*pb.EventBook) ([]*pb.CommandBook, error) {
+			On("examples.KnownEvent", func(source *pb.EventBook, event *anypb.Any, destinations *Destinations) ([]*pb.CommandBook, error) {
 				return []*pb.CommandBook{{}}, nil
 			})
 
@@ -267,7 +267,6 @@ func (h *MockCHHandler) OnRejected(
 // MockSagaHandler implements SagaDomainHandler for testing.
 type MockSagaHandler struct {
 	eventTypes   []string
-	prepareCalls int
 	executeCalls int
 }
 
@@ -279,17 +278,10 @@ func (h *MockSagaHandler) EventTypes() []string {
 	return h.eventTypes
 }
 
-func (h *MockSagaHandler) Prepare(source *pb.EventBook, event *anypb.Any) []*pb.Cover {
-	h.prepareCalls++
-	return []*pb.Cover{
-		{Domain: "destination", Root: &pb.UUID{Value: make([]byte, 16)}},
-	}
-}
-
 func (h *MockSagaHandler) Execute(
 	source *pb.EventBook,
 	event *anypb.Any,
-	destinations []*pb.EventBook,
+	destinations *Destinations,
 ) (*SagaHandlerResponse, error) {
 	h.executeCalls++
 	return &SagaHandlerResponse{
@@ -317,9 +309,8 @@ func (h *MockSagaHandler) OnRejected(
 
 // MockPMHandler implements ProcessManagerDomainHandler for testing.
 type MockPMHandler struct {
-	eventTypes   []string
-	prepareCalls int
-	handleCalls  int
+	eventTypes  []string
+	handleCalls int
 }
 
 func NewMockPMHandler(types ...string) *MockPMHandler {
@@ -330,16 +321,11 @@ func (h *MockPMHandler) EventTypes() []string {
 	return h.eventTypes
 }
 
-func (h *MockPMHandler) Prepare(trigger *pb.EventBook, state *TestState, event *anypb.Any) []*pb.Cover {
-	h.prepareCalls++
-	return nil
-}
-
 func (h *MockPMHandler) Handle(
 	trigger *pb.EventBook,
 	state *TestState,
 	event *anypb.Any,
-	destinations []*pb.EventBook,
+	destinations *Destinations,
 ) (*ProcessManagerResponse, error) {
 	h.handleCalls++
 	return &ProcessManagerResponse{
@@ -515,32 +501,6 @@ func TestSagaRouterSubscriptions(t *testing.T) {
 		t.Error("expected 'order' domain in subscriptions")
 	} else if len(types) != 2 {
 		t.Errorf("expected 2 types for 'order' domain, got %d", len(types))
-	}
-}
-
-func TestSagaRouterPrepareDestinations(t *testing.T) {
-	handler := NewMockSagaHandler("test.OrderCreated")
-	router := NewSagaRouter("saga-order-fulfillment", "order", handler)
-
-	source := &pb.EventBook{
-		Cover: &pb.Cover{Domain: "order"},
-		Pages: []*pb.EventPage{
-			{
-				Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: 0}},
-				Payload: &pb.EventPage_Event{
-					Event: &anypb.Any{TypeUrl: "type.googleapis.com/test.OrderCreated"},
-				},
-			},
-		},
-	}
-
-	covers := router.PrepareDestinations(source)
-	if len(covers) != 1 {
-		t.Errorf("expected 1 cover, got %d", len(covers))
-	}
-
-	if handler.prepareCalls != 1 {
-		t.Errorf("expected 1 prepare call, got %d", handler.prepareCalls)
 	}
 }
 
@@ -1021,128 +981,8 @@ func TestProcessManagerRouterDispatchNotification(t *testing.T) {
 }
 
 // ============================================================================
-// PrepareDestinations Tests
-// ============================================================================
-
-func TestProcessManagerRouterPrepareDestinations(t *testing.T) {
-	handler := NewMockPMHandler("test.OrderCreated")
-
-	rebuild := func(events *pb.EventBook) *TestState {
-		return &TestState{Value: "rebuilt"}
-	}
-
-	router := NewProcessManagerRouter[*TestState]("pmg-order-flow", "order-flow", rebuild).
-		Domain("order", handler)
-
-	trigger := &pb.EventBook{
-		Cover: &pb.Cover{Domain: "order"},
-		Pages: []*pb.EventPage{
-			{
-				Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: 0}},
-				Payload: &pb.EventPage_Event{
-					Event: &anypb.Any{TypeUrl: "type.googleapis.com/test.OrderCreated"},
-				},
-			},
-		},
-	}
-
-	processState := &pb.EventBook{
-		Cover: &pb.Cover{Domain: "order-flow"},
-		Pages: []*pb.EventPage{},
-	}
-
-	covers := router.PrepareDestinations(trigger, processState)
-
-	// MockPMHandler.Prepare returns nil by default
-	if covers != nil && len(covers) > 0 {
-		t.Errorf("expected empty covers from mock, got %d", len(covers))
-	}
-
-	// Verify Prepare was called
-	if handler.prepareCalls != 1 {
-		t.Errorf("expected 1 prepare call, got %d", handler.prepareCalls)
-	}
-}
-
-func TestProcessManagerRouterPrepareDestinationsNilTrigger(t *testing.T) {
-	rebuild := func(events *pb.EventBook) *TestState {
-		return &TestState{}
-	}
-
-	router := NewProcessManagerRouter[*TestState]("pmg-test", "test-flow", rebuild)
-
-	covers := router.PrepareDestinations(nil, nil)
-
-	if covers != nil {
-		t.Error("expected nil covers for nil trigger")
-	}
-}
-
-func TestProcessManagerRouterPrepareDestinationsUnknownDomain(t *testing.T) {
-	rebuild := func(events *pb.EventBook) *TestState {
-		return &TestState{}
-	}
-
-	router := NewProcessManagerRouter[*TestState]("pmg-test", "test-flow", rebuild)
-	// No handlers registered
-
-	trigger := &pb.EventBook{
-		Cover: &pb.Cover{Domain: "unknown"},
-		Pages: []*pb.EventPage{
-			{
-				Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: 0}},
-				Payload: &pb.EventPage_Event{
-					Event: &anypb.Any{TypeUrl: "type.googleapis.com/test.Event"},
-				},
-			},
-		},
-	}
-
-	covers := router.PrepareDestinations(trigger, nil)
-
-	if covers != nil {
-		t.Error("expected nil covers for unknown domain")
-	}
-}
-
-// ============================================================================
 // Edge Case Tests
 // ============================================================================
-
-func TestSagaRouterPrepareDestinationsNilSource(t *testing.T) {
-	handler := NewMockSagaHandler("test.OrderCreated")
-	router := NewSagaRouter("saga-order-fulfillment", "order", handler)
-
-	covers := router.PrepareDestinations(nil)
-
-	if covers != nil {
-		t.Error("expected nil covers for nil source")
-	}
-
-	if handler.prepareCalls != 0 {
-		t.Errorf("expected 0 prepare calls for nil source, got %d", handler.prepareCalls)
-	}
-}
-
-func TestSagaRouterPrepareDestinationsEmptyPages(t *testing.T) {
-	handler := NewMockSagaHandler("test.OrderCreated")
-	router := NewSagaRouter("saga-order-fulfillment", "order", handler)
-
-	source := &pb.EventBook{
-		Cover: &pb.Cover{Domain: "order"},
-		Pages: []*pb.EventPage{}, // Empty pages
-	}
-
-	covers := router.PrepareDestinations(source)
-
-	if covers != nil {
-		t.Error("expected nil covers for empty pages")
-	}
-
-	if handler.prepareCalls != 0 {
-		t.Errorf("expected 0 prepare calls for empty pages, got %d", handler.prepareCalls)
-	}
-}
 
 func TestCommandHandlerRouterDispatchNoPages(t *testing.T) {
 	handler := NewMockCHHandler("test.CreateThing")

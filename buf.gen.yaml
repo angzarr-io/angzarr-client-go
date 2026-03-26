@@ -1,6 +1,7 @@
 version: v2
 inputs:
-  - module: buf.build/angzarr/angzarr
+  # Use local proto from core during development
+  - directory: /home/babbitt/workspace/angzarr/core/main/proto
 plugins:
   - remote: buf.build/protocolbuffers/go
     out: proto

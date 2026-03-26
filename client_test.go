@@ -114,11 +114,7 @@ type mockProcessManagerCoordinatorServiceClient struct {
 	handleSpeculativeFn func(ctx context.Context, in *pb.SpeculatePmRequest, opts ...grpc.CallOption) (*pb.ProcessManagerHandleResponse, error)
 }
 
-func (m *mockProcessManagerCoordinatorServiceClient) Prepare(ctx context.Context, in *pb.ProcessManagerPrepareRequest, opts ...grpc.CallOption) (*pb.ProcessManagerPrepareResponse, error) {
-	return &pb.ProcessManagerPrepareResponse{}, nil
-}
-
-func (m *mockProcessManagerCoordinatorServiceClient) Handle(ctx context.Context, in *pb.ProcessManagerHandleRequest, opts ...grpc.CallOption) (*pb.ProcessManagerHandleResponse, error) {
+func (m *mockProcessManagerCoordinatorServiceClient) Handle(ctx context.Context, in *pb.ProcessManagerCoordinatorRequest, opts ...grpc.CallOption) (*pb.ProcessManagerHandleResponse, error) {
 	return &pb.ProcessManagerHandleResponse{}, nil
 }
 

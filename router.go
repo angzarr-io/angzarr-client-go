@@ -228,18 +228,10 @@ func (r *CommandRouter[S]) RebuildState(events *pb.EventBook) S {
 // Parameters:
 //   - source: The source EventBook
 //   - event: The event Any from the EventPage
-//   - destinations: EventBooks for destinations declared in Prepare
+//   - destinations: Destination sequences for command stamping
 //
 // Returns: List of CommandBooks to execute on other aggregates
-type EventHandler func(source *pb.EventBook, event *anypb.Any, destinations []*pb.EventBook) ([]*pb.CommandBook, error)
-
-// PrepareHandler declares which destinations are needed for an event type.
-// Parameters:
-//   - source: The source EventBook
-//   - event: The event Any from the EventPage
-//
-// Returns: List of Covers for destinations to fetch
-type PrepareHandler func(source *pb.EventBook, event *anypb.Any) []*pb.Cover
+type EventHandler func(source *pb.EventBook, event *anypb.Any, destinations *Destinations) ([]*pb.CommandBook, error)
 
 // EventRouter dispatches events to handlers by type_url suffix.
 // Unified router for sagas, process managers, and projectors.
@@ -267,10 +259,9 @@ type PrepareHandler func(source *pb.EventBook, event *anypb.Any) []*pb.Cover
 //	    Domain("hand").
 //	    On("CardsDealt", handleDealt)
 type EventRouter struct {
-	name            string
-	currentDomain   string
-	handlers        map[string][]eventRegistration   // domain -> handlers
-	prepareHandlers map[string][]prepareRegistration // domain -> prepare handlers
+	name          string
+	currentDomain string
+	handlers      map[string][]eventRegistration // domain -> handlers
 }
 
 type eventRegistration struct {
@@ -278,19 +269,13 @@ type eventRegistration struct {
 	handler  EventHandler
 }
 
-type prepareRegistration struct {
-	fullName string
-	handler  PrepareHandler
-}
-
 // NewEventRouter creates a new router for the given component name.
 // For single-domain routers, you can pass an optional inputDomain as the second argument
 // (backwards compatibility). For multi-domain routers, use Domain() instead.
 func NewEventRouter(name string, inputDomain ...string) *EventRouter {
 	router := &EventRouter{
-		name:            name,
-		handlers:        make(map[string][]eventRegistration),
-		prepareHandlers: make(map[string][]prepareRegistration),
+		name:     name,
+		handlers: make(map[string][]eventRegistration),
 	}
 	// Backwards compatibility: if inputDomain provided, set it as current context
 	if len(inputDomain) > 0 && inputDomain[0] != "" {
@@ -305,25 +290,6 @@ func (r *EventRouter) Domain(name string) *EventRouter {
 	if _, ok := r.handlers[name]; !ok {
 		r.handlers[name] = make([]eventRegistration, 0)
 	}
-	if _, ok := r.prepareHandlers[name]; !ok {
-		r.prepareHandlers[name] = make([]prepareRegistration, 0)
-	}
-	return r
-}
-
-// Prepare registers a prepare handler for an event type by fully-qualified name.
-// The prepare handler declares which destinations are needed before Execute.
-// Must be called after Domain() to set context.
-//
-// The fullName should be the proto full name (e.g., "examples.HandStarted").
-func (r *EventRouter) Prepare(fullName string, handler PrepareHandler) *EventRouter {
-	if r.currentDomain == "" {
-		panic("Must call Domain() before Prepare()")
-	}
-	r.prepareHandlers[r.currentDomain] = append(
-		r.prepareHandlers[r.currentDomain],
-		prepareRegistration{fullName: fullName, handler: handler},
-	)
 	return r
 }
 
@@ -362,25 +328,6 @@ func OnEvent[T proto.Message](r *EventRouter, handler EventHandler) *EventRouter
 	return r
 }
 
-// PrepareEvent registers a prepare handler for an event type using proto reflection.
-// Must be called after Domain() to set context.
-//
-// Example:
-//
-//	PrepareEvent[*examples.HandStarted](router, prepareStarted)
-func PrepareEvent[T proto.Message](r *EventRouter, handler PrepareHandler) *EventRouter {
-	if r.currentDomain == "" {
-		panic("Must call Domain() before PrepareEvent()")
-	}
-	var zero T
-	fullName := string(zero.ProtoReflect().Descriptor().FullName())
-	r.prepareHandlers[r.currentDomain] = append(
-		r.prepareHandlers[r.currentDomain],
-		prepareRegistration{fullName: fullName, handler: handler},
-	)
-	return r
-}
-
 // Subscriptions auto-derives subscriptions from registered handlers.
 // Returns list of (domain, event_types) pairs with fully-qualified type names.
 func (r *EventRouter) Subscriptions() map[string][]string {
@@ -397,41 +344,9 @@ func (r *EventRouter) Subscriptions() map[string][]string {
 	return result
 }
 
-// PrepareDestinations returns the destination covers needed for the given source.
-// Routes based on source domain.
-func (r *EventRouter) PrepareDestinations(source *pb.EventBook) []*pb.Cover {
-	if source == nil || len(source.Pages) == 0 {
-		return nil
-	}
-
-	sourceDomain := ""
-	if source.Cover != nil {
-		sourceDomain = source.Cover.Domain
-	}
-
-	domainHandlers, ok := r.prepareHandlers[sourceDomain]
-	if !ok {
-		return nil
-	}
-
-	// Use the last event page
-	page := source.Pages[len(source.Pages)-1]
-	event := page.GetEvent()
-	if event == nil {
-		return nil
-	}
-
-	for _, reg := range domainHandlers {
-		if event.TypeUrl == TypeURLPrefix+reg.fullName {
-			return reg.handler(source, event)
-		}
-	}
-	return nil
-}
-
 // Dispatch routes all events in an EventBook to registered handlers.
 // Routes based on source domain and event type (exact match).
-func (r *EventRouter) Dispatch(source *pb.EventBook, destinations []*pb.EventBook) ([]*pb.CommandBook, error) {
+func (r *EventRouter) Dispatch(source *pb.EventBook, destinationSequences map[string]uint32) ([]*pb.CommandBook, error) {
 	if source == nil {
 		return nil, nil
 	}
@@ -445,6 +360,8 @@ func (r *EventRouter) Dispatch(source *pb.EventBook, destinations []*pb.EventBoo
 	if !ok {
 		return nil, nil
 	}
+
+	destinations := NewDestinations(destinationSequences)
 
 	var commands []*pb.CommandBook
 	for _, page := range source.Pages {
@@ -589,6 +506,14 @@ func (r *StateRouter[S]) ToRebuilder() StateRebuilder[S] {
 	return func(events *pb.EventBook) S {
 		return r.WithEventBook(events)
 	}
+}
+
+// RebuildFromEventBook implements DestinationRebuilder for automatic
+// destination state rebuilding in process managers.
+//
+// Returns the rebuilt state as any (must be type-asserted by caller).
+func (r *StateRouter[S]) RebuildFromEventBook(eventBook *pb.EventBook) any {
+	return r.WithEventBook(eventBook)
 }
 
 // makeEventApplier uses reflection to create an EventApplier from a typed handler.
@@ -843,23 +768,8 @@ func (r *SagaRouter) Subscriptions() map[string][]string {
 	}
 }
 
-// PrepareDestinations returns destinations needed for the given source events.
-func (r *SagaRouter) PrepareDestinations(source *pb.EventBook) []*pb.Cover {
-	if source == nil || len(source.Pages) == 0 {
-		return nil
-	}
-
-	eventPage := source.Pages[len(source.Pages)-1]
-	eventAny := eventPage.GetEvent()
-	if eventAny == nil {
-		return nil
-	}
-
-	return r.handler.Prepare(source, eventAny)
-}
-
 // Dispatch routes an event to the saga handler.
-func (r *SagaRouter) Dispatch(source *pb.EventBook, destinations []*pb.EventBook) (*pb.SagaResponse, error) {
+func (r *SagaRouter) Dispatch(source *pb.EventBook, destinationSequences map[string]uint32) (*pb.SagaResponse, error) {
 	if source == nil || len(source.Pages) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "source event book has no events")
 	}
@@ -875,6 +785,7 @@ func (r *SagaRouter) Dispatch(source *pb.EventBook, destinations []*pb.EventBook
 		return r.dispatchSagaNotification(eventAny)
 	}
 
+	destinations := NewDestinations(destinationSequences)
 	response, err := r.handler.Execute(source, eventAny, destinations)
 	if err != nil {
 		return nil, err
@@ -930,6 +841,7 @@ func (r *SagaRouter) dispatchSagaNotification(eventAny *anypb.Any) (*pb.SagaResp
 // ProcessManagerRouter wraps multiple ProcessManagerDomainHandlers for routing events.
 //
 // Domains are registered via fluent Domain() calls.
+// Destinations are now config-driven (no more destination routers).
 type ProcessManagerRouter[S any] struct {
 	name     string
 	pmDomain string
@@ -982,42 +894,10 @@ func (r *ProcessManagerRouter[S]) RebuildState(events *pb.EventBook) S {
 	return r.rebuild(events)
 }
 
-// PrepareDestinations returns destinations needed for the given trigger and process state.
-func (r *ProcessManagerRouter[S]) PrepareDestinations(trigger, processState *pb.EventBook) []*pb.Cover {
-	if trigger == nil || len(trigger.Pages) == 0 {
-		return nil
-	}
-
-	triggerDomain := ""
-	if trigger.Cover != nil {
-		triggerDomain = trigger.Cover.Domain
-	}
-
-	eventPage := trigger.Pages[len(trigger.Pages)-1]
-	eventAny := eventPage.GetEvent()
-	if eventAny == nil {
-		return nil
-	}
-
-	var state S
-	if processState != nil {
-		state = r.rebuild(processState)
-	} else {
-		state = r.rebuild(&pb.EventBook{})
-	}
-
-	handler, ok := r.domains[triggerDomain]
-	if !ok {
-		return nil
-	}
-
-	return handler.Prepare(trigger, state, eventAny)
-}
-
 // Dispatch routes a trigger event to the appropriate handler.
 func (r *ProcessManagerRouter[S]) Dispatch(
 	trigger, processState *pb.EventBook,
-	destinations []*pb.EventBook,
+	destinationSequences map[string]uint32,
 ) (*pb.ProcessManagerHandleResponse, error) {
 	if trigger == nil || len(trigger.Pages) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "trigger event book has no events")
@@ -1046,6 +926,9 @@ func (r *ProcessManagerRouter[S]) Dispatch(
 		return r.dispatchPMNotification(handler, eventAny, state)
 	}
 
+	// Create destinations from sequences for command stamping
+	destinations := NewDestinations(destinationSequences)
+
 	response, err := handler.Handle(trigger, state, eventAny, destinations)
 	if err != nil {
 		return nil, err
@@ -1058,8 +941,6 @@ func (r *ProcessManagerRouter[S]) Dispatch(
 	return &pb.ProcessManagerHandleResponse{
 		Commands:      response.Commands,
 		ProcessEvents: response.ProcessEvents,
-		// TODO: Add response.Facts once Go proto is regenerated
-		// Facts:         response.Facts,
 	}, nil
 }
 

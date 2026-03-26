@@ -160,9 +160,9 @@ func NewSagaHandler(router *EventRouter) *SagaHandler {
 }
 
 // Handle processes source events and returns commands for other aggregates.
-// Sagas are stateless translators - they receive source events only.
+// Sagas are stateless translators - they receive source events and destination sequences.
 func (h *SagaHandler) Handle(ctx context.Context, req *pb.SagaHandleRequest) (*pb.SagaResponse, error) {
-	commands, err := h.router.Dispatch(req.Source, nil)
+	commands, err := h.router.Dispatch(req.Source, req.GetDestinationSequences())
 	if err != nil {
 		var rejected CommandRejectedError
 		if errors.As(err, &rejected) {
@@ -296,9 +296,9 @@ func NewTraitSagaHandler(router *SagaRouter) *TraitSagaHandler {
 }
 
 // Handle processes source events and returns commands for other aggregates.
-// Sagas are stateless translators - they receive source events only.
+// Sagas are stateless translators - they receive source events and destination sequences.
 func (h *TraitSagaHandler) Handle(ctx context.Context, req *pb.SagaHandleRequest) (*pb.SagaResponse, error) {
-	resp, err := h.router.Dispatch(req.Source, nil)
+	resp, err := h.router.Dispatch(req.Source, req.GetDestinationSequences())
 	if err != nil {
 		var rejected CommandRejectedError
 		if errors.As(err, &rejected) {
@@ -329,8 +329,7 @@ func RunTraitSagaServer(name, defaultPort string, router *SagaRouter) {
 // TraitProcessManagerHandler wraps a ProcessManagerRouter for the gRPC ProcessManager service.
 type TraitProcessManagerHandler[S any] struct {
 	pb.UnimplementedProcessManagerServiceServer
-	router   *ProcessManagerRouter[S]
-	replayFn PMReplayFunc
+	router *ProcessManagerRouter[S]
 }
 
 // NewTraitProcessManagerHandler creates a new process manager handler.
@@ -338,33 +337,15 @@ func NewTraitProcessManagerHandler[S any](router *ProcessManagerRouter[S]) *Trai
 	return &TraitProcessManagerHandler[S]{router: router}
 }
 
-// WithReplay sets the replay callback for state reconstruction.
-func (h *TraitProcessManagerHandler[S]) WithReplay(fn PMReplayFunc) *TraitProcessManagerHandler[S] {
-	h.replayFn = fn
-	return h
-}
-
-// Replay rebuilds PM state from events and packs it into Any.
-func (h *TraitProcessManagerHandler[S]) Replay(ctx context.Context, req *pb.ProcessManagerReplayRequest) (*pb.ProcessManagerReplayResponse, error) {
-	if h.replayFn != nil {
-		state, err := h.replayFn(req.Events)
-		if err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
-		}
-		return &pb.ProcessManagerReplayResponse{State: state}, nil
-	}
-	return &pb.ProcessManagerReplayResponse{}, nil
-}
-
 // Prepare declares which additional destinations are needed.
+// Destinations are now config-driven, no dynamic declaration needed.
 func (h *TraitProcessManagerHandler[S]) Prepare(ctx context.Context, req *pb.ProcessManagerPrepareRequest) (*pb.ProcessManagerPrepareResponse, error) {
-	destinations := h.router.PrepareDestinations(req.Trigger, req.ProcessState)
-	return &pb.ProcessManagerPrepareResponse{Destinations: destinations}, nil
+	return &pb.ProcessManagerPrepareResponse{}, nil
 }
 
 // Handle processes events and returns commands and process events.
 func (h *TraitProcessManagerHandler[S]) Handle(ctx context.Context, req *pb.ProcessManagerHandleRequest) (*pb.ProcessManagerHandleResponse, error) {
-	resp, err := h.router.Dispatch(req.Trigger, req.ProcessState, req.Destinations)
+	resp, err := h.router.Dispatch(req.Trigger, req.ProcessState, req.GetDestinationSequences())
 	if err != nil {
 		var rejected CommandRejectedError
 		if errors.As(err, &rejected) {
@@ -490,15 +471,13 @@ func RunProjectorServer(name, defaultPort string, handler *ProjectorHandler) {
 	})
 }
 
-// PMReplayFunc rebuilds PM state from events and packs it into Any.
-// Called by framework before Prepare/Handle to convert EventBook to typed state.
-type PMReplayFunc func(processState *pb.EventBook) (*anypb.Any, error)
-
 // PMPrepareFunc declares additional destinations needed beyond the trigger.
+// NOTE: Destinations are now config-driven, this is for backward compatibility.
 type PMPrepareFunc func(trigger, processState *pb.EventBook) []*pb.Cover
 
 // PMHandleFunc processes events and returns commands and process events.
-type PMHandleFunc func(trigger, processState *pb.EventBook, destinations []*pb.EventBook) ([]*pb.CommandBook, *pb.EventBook, error)
+// Destination sequences are provided for command stamping (config-driven).
+type PMHandleFunc func(trigger, processState *pb.EventBook, destinationSequences map[string]uint32) ([]*pb.CommandBook, *pb.EventBook, error)
 
 // PMRevocationFunc handles saga/PM compensation for commands issued by this PM.
 // Called when a command produced by this PM is rejected by the target aggregate.
@@ -518,7 +497,6 @@ type PMRevocationFunc func(notification *pb.Notification, processState *pb.Event
 type ProcessManagerHandler struct {
 	pb.UnimplementedProcessManagerServiceServer
 	name         string
-	replayFn     PMReplayFunc
 	prepareFn    PMPrepareFunc
 	handleFn     PMHandleFunc
 	revocationFn PMRevocationFunc
@@ -529,12 +507,6 @@ func NewProcessManagerHandler(name string) *ProcessManagerHandler {
 	return &ProcessManagerHandler{
 		name: name,
 	}
-}
-
-// WithReplay sets the replay callback for state reconstruction.
-func (h *ProcessManagerHandler) WithReplay(fn PMReplayFunc) *ProcessManagerHandler {
-	h.replayFn = fn
-	return h
 }
 
 // WithPrepare sets the prepare callback.
@@ -563,18 +535,6 @@ func (h *ProcessManagerHandler) WithRevocationHandler(fn PMRevocationFunc) *Proc
 	return h
 }
 
-// Replay rebuilds PM state from events and packs it into Any.
-func (h *ProcessManagerHandler) Replay(ctx context.Context, req *pb.ProcessManagerReplayRequest) (*pb.ProcessManagerReplayResponse, error) {
-	if h.replayFn != nil {
-		state, err := h.replayFn(req.Events)
-		if err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
-		}
-		return &pb.ProcessManagerReplayResponse{State: state}, nil
-	}
-	return &pb.ProcessManagerReplayResponse{}, nil
-}
-
 // Prepare declares which additional destinations are needed.
 func (h *ProcessManagerHandler) Prepare(ctx context.Context, req *pb.ProcessManagerPrepareRequest) (*pb.ProcessManagerPrepareResponse, error) {
 	if h.prepareFn != nil {
@@ -587,7 +547,7 @@ func (h *ProcessManagerHandler) Prepare(ctx context.Context, req *pb.ProcessMana
 // Handle processes events and returns commands and process events.
 func (h *ProcessManagerHandler) Handle(ctx context.Context, req *pb.ProcessManagerHandleRequest) (*pb.ProcessManagerHandleResponse, error) {
 	if h.handleFn != nil {
-		commands, processEvents, err := h.handleFn(req.Trigger, req.ProcessState, req.Destinations)
+		commands, processEvents, err := h.handleFn(req.Trigger, req.ProcessState, req.GetDestinationSequences())
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
@@ -715,12 +675,12 @@ func RunOOCommandHandlerServer[S any, A OOCommandHandler[S]](domain, defaultPort
 
 // OOSaga interface for OO-style sagas.
 // Implemented by types that embed SagaBase.
-// Sagas are stateless translators - they receive source events only.
+// Sagas are stateless translators - they receive source events and destination sequences.
 type OOSaga interface {
 	Name() string
 	InputDomain() string
 	OutputDomain() string
-	Handle(source *pb.EventBook) (*SagaHandlerResponse, error)
+	Handle(source *pb.EventBook, destinations *Destinations) (*SagaHandlerResponse, error)
 }
 
 // OOSagaHandler wraps an OO-style saga for the gRPC Saga service.
@@ -735,9 +695,10 @@ func NewOOSagaHandler(saga OOSaga) *OOSagaHandler {
 }
 
 // Handle processes source events and returns commands for other aggregates.
-// Sagas are stateless translators - they receive source events only.
+// Sagas are stateless translators - they receive source events and destination sequences.
 func (h *OOSagaHandler) Handle(ctx context.Context, req *pb.SagaHandleRequest) (*pb.SagaResponse, error) {
-	response, err := h.saga.Handle(req.Source)
+	destinations := NewDestinations(req.GetDestinationSequences())
+	response, err := h.saga.Handle(req.Source, destinations)
 	if err != nil {
 		var rejected CommandRejectedError
 		if errors.As(err, &rejected) {
@@ -779,11 +740,7 @@ type OOProcessManager interface {
 	Name() string
 	PMDomain() string
 	InputDomains() []string
-	// ReplayState rebuilds PM state from events and packs it into Any.
-	// Called by framework before Prepare/Handle to convert EventBook to typed state.
-	ReplayState(processState *pb.EventBook) (*anypb.Any, error)
-	PrepareDestinations(trigger, processState *pb.EventBook) []*pb.Cover
-	Handle(trigger, processState *pb.EventBook, destinations []*pb.EventBook) ([]*pb.CommandBook, *pb.EventBook, *pb.Notification, error)
+	Handle(trigger, processState *pb.EventBook, destinations *Destinations) ([]*pb.CommandBook, *pb.EventBook, *pb.Notification, error)
 }
 
 // OOProcessManagerHandler wraps an OO-style process manager for the gRPC ProcessManager service.
@@ -797,25 +754,16 @@ func NewOOProcessManagerHandler(pm OOProcessManager) *OOProcessManagerHandler {
 	return &OOProcessManagerHandler{pm: pm}
 }
 
-// Replay rebuilds PM state from events and packs it into Any.
-// Called by framework before Prepare/Handle to convert EventBook to typed state.
-func (h *OOProcessManagerHandler) Replay(ctx context.Context, req *pb.ProcessManagerReplayRequest) (*pb.ProcessManagerReplayResponse, error) {
-	state, err := h.pm.ReplayState(req.Events)
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-	return &pb.ProcessManagerReplayResponse{State: state}, nil
-}
-
 // Prepare declares which additional destinations are needed.
 func (h *OOProcessManagerHandler) Prepare(ctx context.Context, req *pb.ProcessManagerPrepareRequest) (*pb.ProcessManagerPrepareResponse, error) {
-	destinations := h.pm.PrepareDestinations(req.Trigger, req.ProcessState)
-	return &pb.ProcessManagerPrepareResponse{Destinations: destinations}, nil
+	// Destinations are now config-driven, no dynamic declaration needed
+	return &pb.ProcessManagerPrepareResponse{}, nil
 }
 
 // Handle processes events and returns commands and process events.
 func (h *OOProcessManagerHandler) Handle(ctx context.Context, req *pb.ProcessManagerHandleRequest) (*pb.ProcessManagerHandleResponse, error) {
-	commands, processEvents, _, err := h.pm.Handle(req.Trigger, req.ProcessState, req.Destinations)
+	destinations := NewDestinations(req.GetDestinationSequences())
+	commands, processEvents, _, err := h.pm.Handle(req.Trigger, req.ProcessState, destinations)
 	if err != nil {
 		var rejected CommandRejectedError
 		if errors.As(err, &rejected) {
