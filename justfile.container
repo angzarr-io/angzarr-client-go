@@ -12,7 +12,7 @@ default:
     @just --list
 
 proto:
-    cd {{ROOT}}/proto && buf generate --template buf.gen.go.yaml
+    cd {{ROOT}} && buf generate
 
 build: proto
     go build -ldflags '{{LDFLAGS}}' ./...
