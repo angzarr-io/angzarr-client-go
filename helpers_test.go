@@ -20,7 +20,7 @@ func TestConstants(t *testing.T) {
 		{"WildcardDomain", WildcardDomain, "*"},
 		{"DefaultEdition", DefaultEdition, "angzarr"},
 		{"MetaAngzarrDomain", MetaAngzarrDomain, "_angzarr"},
-		{"ProjectionDomainPrefix", ProjectionDomainPrefix, "projection:"},
+		{"ProjectionDomainPrefix", ProjectionDomainPrefix, "_projection"},
 		{"CorrelationIDHeader", CorrelationIDHeader, "x-correlation-id"},
 		{"TypeURLPrefix", TypeURLPrefix, "type.googleapis.com/"},
 	}

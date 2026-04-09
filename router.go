@@ -19,8 +19,8 @@ import (
 
 // Error constants.
 const (
-	ErrMsgUnknownCommand = "unknown command type"
-	ErrMsgNoCommandPages = "no command pages"
+	ErrMsgUnknownCommand = "Unknown command type"
+	ErrMsgNoCommandPages = "No command pages"
 )
 
 // CommandHandler handles a command and returns events.
@@ -636,7 +636,7 @@ func (r *CommandHandlerRouter[S]) Dispatch(cmd *pb.ContextualCommand) (*pb.Busin
 	}
 
 	if len(commandBook.Pages) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "no command pages")
+		return nil, status.Error(codes.InvalidArgument, ErrMsgNoCommandPages)
 	}
 
 	commandPage := commandBook.Pages[0]
