@@ -11,7 +11,7 @@ import (
 var opts = godog.Options{
 	Output:      colors.Colored(os.Stdout),
 	Format:      "progress",
-	Paths:       []string{"../../features"},
+	Paths:       []string{"../angzarr-core/features/client"},
 	Randomize:   0,
 	Concurrency: 1,
 	Strict:      false, // Allow pending scenarios without failing
