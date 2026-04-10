@@ -19,8 +19,8 @@ import (
 
 // Error constants.
 const (
-	ErrMsgUnknownCommand = "unknown command type"
-	ErrMsgNoCommandPages = "no command pages"
+	ErrMsgUnknownCommand = "Unknown command type"
+	ErrMsgNoCommandPages = "No command pages"
 )
 
 // CommandHandler handles a command and returns events.
@@ -129,7 +129,13 @@ func (r *CommandRouter[S]) OnRejected(domain, command string, handler Revocation
 // and calls the registered handler. Detects Notification and routes
 // to the rejection handler.
 func (r *CommandRouter[S]) Dispatch(cmd *pb.ContextualCommand) (*pb.BusinessResponse, error) {
+	if cmd == nil {
+		return nil, fmt.Errorf("%s", ErrMsgNoCommandPages)
+	}
 	commandBook := cmd.Command
+	if commandBook == nil {
+		return nil, fmt.Errorf("%s", ErrMsgNoCommandPages)
+	}
 	priorEvents := cmd.Events
 
 	state := r.rebuild(priorEvents)
@@ -636,7 +642,7 @@ func (r *CommandHandlerRouter[S]) Dispatch(cmd *pb.ContextualCommand) (*pb.Busin
 	}
 
 	if len(commandBook.Pages) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "no command pages")
+		return nil, status.Error(codes.InvalidArgument, ErrMsgNoCommandPages)
 	}
 
 	commandPage := commandBook.Pages[0]

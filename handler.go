@@ -642,6 +642,9 @@ func (h *OOCommandHandlerGrpc[S, A]) HandleSync(ctx context.Context, req *pb.Con
 }
 
 func (h *OOCommandHandlerGrpc[S, A]) dispatch(req *pb.ContextualCommand) (*pb.BusinessResponse, error) {
+	if req == nil || req.Command == nil {
+		return nil, status.Error(codes.InvalidArgument, "no command provided")
+	}
 	// Create command handler with prior events
 	ch := h.factory(req.Events)
 
