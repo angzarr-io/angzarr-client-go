@@ -81,7 +81,7 @@ func GetTransportConfig() TransportConfig {
 	}
 	return TransportConfig{
 		Type:    "tcp",
-		Address: "[::]:" + port,
+		Address: "0.0.0.0:" + port,
 	}
 }
 
