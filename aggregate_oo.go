@@ -49,11 +49,29 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 
 	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
+
+// protoFullNameCache caches the proto full name for each Go type, avoiding
+// repeated reflection when OO handlers are created per-request.
+var protoFullNameCache sync.Map // reflect.Type -> string
+
+// cachedProtoFullName returns the proto full name for the given Go type,
+// using a cache to avoid repeated reflection and proto descriptor lookups.
+func cachedProtoFullName(goType reflect.Type) string {
+	if name, ok := protoFullNameCache.Load(goType); ok {
+		return name.(string)
+	}
+	ptr := reflect.New(goType)
+	protoMsg := ptr.Interface().(proto.Message)
+	fullName := string(protoMsg.ProtoReflect().Descriptor().FullName())
+	protoFullNameCache.Store(goType, fullName)
+	return fullName
+}
 
 // applierFunc is an internal type for event appliers.
 type applierFunc[S any] func(state *S, value []byte)
@@ -153,10 +171,8 @@ func (a *CommandHandlerBase[S]) Handles(handler any) {
 	}
 	cmdType := cmdPtrType.Elem()
 
-	// Extract fully-qualified type name via proto reflection
-	cmdPtr := reflect.New(cmdType)
-	protoMsg := cmdPtr.Interface().(proto.Message)
-	fullName := string(protoMsg.ProtoReflect().Descriptor().FullName())
+	// Extract fully-qualified type name (cached to avoid repeated proto reflection)
+	fullName := cachedProtoFullName(cmdType)
 
 	// Create the wrapper function
 	wrapper := func(cmdAny *anypb.Any) (proto.Message, error) {
@@ -226,10 +242,8 @@ func (a *CommandHandlerBase[S]) HandlesMulti(handler any) {
 	}
 	cmdType := cmdPtrType.Elem()
 
-	// Extract fully-qualified type name via proto reflection
-	cmdPtr := reflect.New(cmdType)
-	protoMsg := cmdPtr.Interface().(proto.Message)
-	fullName := string(protoMsg.ProtoReflect().Descriptor().FullName())
+	// Extract fully-qualified type name (cached to avoid repeated proto reflection)
+	fullName := cachedProtoFullName(cmdType)
 
 	// Create the wrapper function
 	wrapper := func(cmdAny *anypb.Any) ([]proto.Message, error) {
@@ -325,10 +339,8 @@ func (a *CommandHandlerBase[S]) Applies(applier any) {
 	}
 	eventType := eventPtrType.Elem()
 
-	// Extract fully-qualified type name via proto reflection
-	eventPtr := reflect.New(eventType)
-	protoMsg := eventPtr.Interface().(proto.Message)
-	fullName := string(protoMsg.ProtoReflect().Descriptor().FullName())
+	// Extract fully-qualified type name (cached to avoid repeated proto reflection)
+	fullName := cachedProtoFullName(eventType)
 
 	// Create the wrapper function
 	wrapper := func(state *S, value []byte) {
