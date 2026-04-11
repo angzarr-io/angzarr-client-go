@@ -100,6 +100,7 @@ type CommandHandlerBase[S any] struct {
 	appliers          map[string]applierFunc[S]
 	rejectionHandlers map[string]rejectionHandlerFunc
 	domain            string
+	nextSeq           uint32 // next sequence for new events, set from EventBook.NextSequence
 }
 
 // Init initializes the command handler base with an event book and state factory.
@@ -445,8 +446,15 @@ func (a *CommandHandlerBase[S]) applyAndRecord(event proto.Message) {
 		a.applyEvent(a.state, eventAny)
 	}
 
-	// Record in event book
-	page := &pb.EventPage{Payload: &pb.EventPage_Event{Event: eventAny}}
+	// Record in event book with sequence header
+	seq := a.nextSeq
+	a.nextSeq++
+	page := &pb.EventPage{
+		Header: &pb.PageHeader{
+			SequenceType: &pb.PageHeader_Sequence{Sequence: seq},
+		},
+		Payload: &pb.EventPage_Event{Event: eventAny},
+	}
 	a.eventBook.Pages = append(a.eventBook.Pages, page)
 }
 
@@ -486,6 +494,9 @@ func (a *CommandHandlerBase[S]) rebuild() {
 	if a.eventBook == nil {
 		return
 	}
+
+	// Capture next sequence before clearing pages
+	a.nextSeq = a.eventBook.NextSequence
 
 	// Apply all events
 	for _, page := range a.eventBook.Pages {
