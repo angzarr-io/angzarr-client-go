@@ -20,7 +20,7 @@ func RequireNotExists(exists bool, message string) error {
 // RequirePositive checks that a value is positive (greater than zero).
 func RequirePositive[T ~int | ~int32 | ~int64 | ~float32 | ~float64](value T, fieldName string) error {
 	if value <= 0 {
-		return NewCommandRejectedError(fieldName + " must be positive")
+		return NewInvalidArgumentError(fieldName + " must be positive")
 	}
 	return nil
 }
@@ -28,7 +28,7 @@ func RequirePositive[T ~int | ~int32 | ~int64 | ~float32 | ~float64](value T, fi
 // RequireNonNegative checks that a value is non-negative (zero or greater).
 func RequireNonNegative[T ~int | ~int32 | ~int64 | ~float32 | ~float64](value T, fieldName string) error {
 	if value < 0 {
-		return NewCommandRejectedError(fieldName + " must be non-negative")
+		return NewInvalidArgumentError(fieldName + " must be non-negative")
 	}
 	return nil
 }
@@ -36,7 +36,7 @@ func RequireNonNegative[T ~int | ~int32 | ~int64 | ~float32 | ~float64](value T,
 // RequireNotEmptyString checks that a string is not empty.
 func RequireNotEmptyString(value string, fieldName string) error {
 	if value == "" {
-		return NewCommandRejectedError(fieldName + " must not be empty")
+		return NewInvalidArgumentError(fieldName + " must not be empty")
 	}
 	return nil
 }
@@ -44,7 +44,7 @@ func RequireNotEmptyString(value string, fieldName string) error {
 // RequireNotEmpty checks that a slice is not empty.
 func RequireNotEmpty[T any](items []T, fieldName string) error {
 	if len(items) == 0 {
-		return NewCommandRejectedError(fieldName + " must not be empty")
+		return NewInvalidArgumentError(fieldName + " must not be empty")
 	}
 	return nil
 }

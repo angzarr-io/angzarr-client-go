@@ -49,11 +49,29 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 
 	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
+
+// protoFullNameCache caches the proto full name for each Go type, avoiding
+// repeated reflection when OO handlers are created per-request.
+var protoFullNameCache sync.Map // reflect.Type -> string
+
+// cachedProtoFullName returns the proto full name for the given Go type,
+// using a cache to avoid repeated reflection and proto descriptor lookups.
+func cachedProtoFullName(goType reflect.Type) string {
+	if name, ok := protoFullNameCache.Load(goType); ok {
+		return name.(string)
+	}
+	ptr := reflect.New(goType)
+	protoMsg := ptr.Interface().(proto.Message)
+	fullName := string(protoMsg.ProtoReflect().Descriptor().FullName())
+	protoFullNameCache.Store(goType, fullName)
+	return fullName
+}
 
 // applierFunc is an internal type for event appliers.
 type applierFunc[S any] func(state *S, value []byte)
@@ -82,6 +100,7 @@ type CommandHandlerBase[S any] struct {
 	appliers          map[string]applierFunc[S]
 	rejectionHandlers map[string]rejectionHandlerFunc
 	domain            string
+	nextSeq           uint32 // next sequence for new events, set from EventBook.NextSequence
 }
 
 // Init initializes the command handler base with an event book and state factory.
@@ -153,10 +172,8 @@ func (a *CommandHandlerBase[S]) Handles(handler any) {
 	}
 	cmdType := cmdPtrType.Elem()
 
-	// Extract fully-qualified type name via proto reflection
-	cmdPtr := reflect.New(cmdType)
-	protoMsg := cmdPtr.Interface().(proto.Message)
-	fullName := string(protoMsg.ProtoReflect().Descriptor().FullName())
+	// Extract fully-qualified type name (cached to avoid repeated proto reflection)
+	fullName := cachedProtoFullName(cmdType)
 
 	// Create the wrapper function
 	wrapper := func(cmdAny *anypb.Any) (proto.Message, error) {
@@ -226,10 +243,8 @@ func (a *CommandHandlerBase[S]) HandlesMulti(handler any) {
 	}
 	cmdType := cmdPtrType.Elem()
 
-	// Extract fully-qualified type name via proto reflection
-	cmdPtr := reflect.New(cmdType)
-	protoMsg := cmdPtr.Interface().(proto.Message)
-	fullName := string(protoMsg.ProtoReflect().Descriptor().FullName())
+	// Extract fully-qualified type name (cached to avoid repeated proto reflection)
+	fullName := cachedProtoFullName(cmdType)
 
 	// Create the wrapper function
 	wrapper := func(cmdAny *anypb.Any) ([]proto.Message, error) {
@@ -325,10 +340,8 @@ func (a *CommandHandlerBase[S]) Applies(applier any) {
 	}
 	eventType := eventPtrType.Elem()
 
-	// Extract fully-qualified type name via proto reflection
-	eventPtr := reflect.New(eventType)
-	protoMsg := eventPtr.Interface().(proto.Message)
-	fullName := string(protoMsg.ProtoReflect().Descriptor().FullName())
+	// Extract fully-qualified type name (cached to avoid repeated proto reflection)
+	fullName := cachedProtoFullName(eventType)
 
 	// Create the wrapper function
 	wrapper := func(state *S, value []byte) {
@@ -433,8 +446,15 @@ func (a *CommandHandlerBase[S]) applyAndRecord(event proto.Message) {
 		a.applyEvent(a.state, eventAny)
 	}
 
-	// Record in event book
-	page := &pb.EventPage{Payload: &pb.EventPage_Event{Event: eventAny}}
+	// Record in event book with sequence header
+	seq := a.nextSeq
+	a.nextSeq++
+	page := &pb.EventPage{
+		Header: &pb.PageHeader{
+			SequenceType: &pb.PageHeader_Sequence{Sequence: seq},
+		},
+		Payload: &pb.EventPage_Event{Event: eventAny},
+	}
 	a.eventBook.Pages = append(a.eventBook.Pages, page)
 }
 
@@ -474,6 +494,9 @@ func (a *CommandHandlerBase[S]) rebuild() {
 	if a.eventBook == nil {
 		return
 	}
+
+	// Capture next sequence before clearing pages
+	a.nextSeq = a.eventBook.NextSequence
 
 	// Apply all events
 	for _, page := range a.eventBook.Pages {

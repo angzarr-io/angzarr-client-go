@@ -19,7 +19,7 @@ const (
 	WildcardDomain         = "*"
 	DefaultEdition         = "angzarr"
 	MetaAngzarrDomain      = "_angzarr"
-	ProjectionDomainPrefix = "projection:"
+	ProjectionDomainPrefix = "_projection"
 	CorrelationIDHeader    = "x-correlation-id"
 	TypeURLPrefix          = "type.googleapis.com/"
 )

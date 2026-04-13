@@ -23,16 +23,22 @@ import (
 // Use this for business rule rejections where the aggregate's current state
 // doesn't allow the operation (e.g., "insufficient funds", "player already exists").
 type CommandRejectedError struct {
-	Message string
+	Message    string
+	StatusCode string // "FAILED_PRECONDITION" or "INVALID_ARGUMENT"
 }
 
 func (e CommandRejectedError) Error() string {
 	return e.Message
 }
 
-// NewCommandRejectedError creates a new command rejected error.
+// NewCommandRejectedError creates a FAILED_PRECONDITION error (default for guard failures).
 func NewCommandRejectedError(msg string) error {
-	return CommandRejectedError{Message: msg}
+	return CommandRejectedError{Message: msg, StatusCode: "FAILED_PRECONDITION"}
+}
+
+// NewInvalidArgumentError creates an INVALID_ARGUMENT error for input validation failures.
+func NewInvalidArgumentError(msg string) error {
+	return CommandRejectedError{Message: msg, StatusCode: "INVALID_ARGUMENT"}
 }
 
 // StatePacker converts aggregate state to protobuf Any for Replay RPC.
@@ -636,6 +642,9 @@ func (h *OOCommandHandlerGrpc[S, A]) HandleSync(ctx context.Context, req *pb.Con
 }
 
 func (h *OOCommandHandlerGrpc[S, A]) dispatch(req *pb.ContextualCommand) (*pb.BusinessResponse, error) {
+	if req == nil || req.Command == nil {
+		return nil, status.Error(codes.InvalidArgument, "no command provided")
+	}
 	// Create command handler with prior events
 	ch := h.factory(req.Events)
 
