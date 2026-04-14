@@ -1,0 +1,12 @@
+# Lefthook configuration
+# https://github.com/evilmartians/lefthook
+#
+# Setup: lefthook install
+# Bypass: git commit --no-verify (or LEFTHOOK=0 git commit)
+
+pre-commit:
+  parallel: false
+  commands:
+    fmt:
+      run: just fmt
+      stage_fixed: true
