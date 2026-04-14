@@ -239,6 +239,11 @@ func (h *MockCHHandler) StateRouter() *StateRouter[*TestState] {
 	return h.stateRouter
 }
 
+func (h *MockCHHandler) HandleFact(facts *pb.EventBook, state *TestState) (*pb.EventBook, error) {
+	// Default: pass-through
+	return facts, nil
+}
+
 func (h *MockCHHandler) Rebuild(events *pb.EventBook) *TestState {
 	return &TestState{Value: "rebuilt", Counter: len(events.GetPages())}
 }
@@ -440,6 +445,28 @@ func TestCommandHandlerDomainHandlerHasStateRouter(t *testing.T) {
 	}
 }
 
+
+func TestCommandHandlerDomainHandlerHasHandleFact(t *testing.T) {
+	handler := NewMockCHHandler("test.CreateThing")
+	facts := &pb.EventBook{
+		Pages: []*pb.EventPage{
+			{Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: "test.FactEvent"}}},
+		},
+	}
+	state := &TestState{}
+
+	result, err := handler.HandleFact(facts, state)
+	if err != nil {
+		t.Fatalf("HandleFact should not error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("HandleFact should return non-nil EventBook")
+	}
+	// Default: pass-through returns original facts
+	if len(result.GetPages()) != len(facts.GetPages()) {
+		t.Errorf("expected %d pages, got %d", len(facts.GetPages()), len(result.GetPages()))
+	}
+}
 func TestCommandHandlerRouterRebuildState(t *testing.T) {
 	handler := NewMockCHHandler("test.CreateThing")
 	router := NewCommandHandlerRouter[*TestState]("test-ch", "things", handler)

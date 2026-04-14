@@ -80,6 +80,11 @@ type CommandHandlerDomainHandler[S any] interface {
 	// Default implementations should delegate to StateRouter().WithEventBook(events).
 	Rebuild(events *pb.EventBook) S
 
+	// HandleFact processes injected facts and returns the resulting EventBook.
+	// Facts are always accepted (cannot be rejected). Override to emit
+	// additional events or augment facts. Default: pass-through.
+	HandleFact(facts *pb.EventBook, state S) (*pb.EventBook, error)
+
 	// Handle processes a command and returns resulting events.
 	// The handler should dispatch internally based on payload.TypeUrl.
 	Handle(
