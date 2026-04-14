@@ -285,7 +285,6 @@ func NewMockSagaHandler(types ...string) *MockSagaHandler {
 	return &MockSagaHandler{eventTypes: types}
 }
 
-
 func (h *MockSagaHandler) EventTypes() []string {
 	return h.eventTypes
 }
@@ -442,7 +441,6 @@ func TestCommandHandlerDomainHandlerHasStateRouter(t *testing.T) {
 	}
 }
 
-
 func TestCommandHandlerDomainHandlerHasHandleFact(t *testing.T) {
 	handler := NewMockCHHandler("test.CreateThing")
 	facts := &pb.EventBook{
@@ -526,7 +524,6 @@ func TestCommandHandlerRouterDispatch(t *testing.T) {
 // SagaRouter Tests
 // ============================================================================
 
-
 func TestSagaRouterCreation(t *testing.T) {
 	handler := NewMockSagaHandler("test.OrderCreated")
 	router := NewSagaRouter("saga-order-fulfillment", "order", "fulfillment", handler)
@@ -597,7 +594,6 @@ func TestSagaRouterDispatch(t *testing.T) {
 // ============================================================================
 // ProcessManagerRouter Tests
 // ============================================================================
-
 
 func TestProcessManagerDomainHandlerHasPrepare(t *testing.T) {
 	handler := NewMockPMHandler("test.OrderCreated")
