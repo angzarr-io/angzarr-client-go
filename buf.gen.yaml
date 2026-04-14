@@ -1,7 +1,7 @@
 version: v2
 inputs:
   # Use local proto from core during development
-  - directory: angzarr/proto
+  - directory: angzarr-core/proto
 plugins:
   - remote: buf.build/protocolbuffers/go
     out: proto
