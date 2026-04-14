@@ -28,3 +28,11 @@ mutate:
 
 mutate-dry:
     go install github.com/go-gremlins/gremlins/cmd/gremlins@latest && gremlins unleash --dry-run --exclude-files="proto/" .
+
+# Format check (gofmt)
+fmt:
+    gofmt -l . | tee /tmp/gofmt.out && test ! -s /tmp/gofmt.out
+
+# Auto-format code
+fmt-fix:
+    gofmt -w .

@@ -8,5 +8,5 @@ pre-commit:
   parallel: false
   commands:
     fmt:
-      run: just fmt
+      run: just fmt-fix
       stage_fixed: true
