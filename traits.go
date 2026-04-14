@@ -138,6 +138,10 @@ type SagaDomainHandler interface {
 	// Used for subscription derivation.
 	EventTypes() []string
 
+	// Prepare returns the covers for destinations needed to execute this saga.
+	// The framework fetches these destinations before calling Execute.
+	Prepare(source *pb.EventBook, event *anypb.Any) []*pb.Cover
+
 	// Execute produces commands and/or events.
 	// Called with source event and destination sequences for command stamping.
 	Execute(
@@ -193,6 +197,10 @@ type SagaDomainHandler interface {
 type ProcessManagerDomainHandler[S any] interface {
 	// EventTypes returns the fully-qualified event type names this handler processes.
 	EventTypes() []string
+
+	// Prepare returns the covers for destinations needed to handle this event.
+	// The framework fetches these destinations before calling Handle.
+	Prepare(trigger *pb.EventBook, state S, event *anypb.Any) []*pb.Cover
 
 	// Handle processes the event and produces commands and PM events.
 	// Destinations provide sequences for command stamping (not EventBook data).

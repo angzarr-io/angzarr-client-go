@@ -280,6 +280,10 @@ func NewMockSagaHandler(types ...string) *MockSagaHandler {
 	return &MockSagaHandler{eventTypes: types}
 }
 
+func (h *MockSagaHandler) Prepare(source *pb.EventBook, event *anypb.Any) []*pb.Cover {
+	return []*pb.Cover{}
+}
+
 func (h *MockSagaHandler) EventTypes() []string {
 	return h.eventTypes
 }
@@ -321,6 +325,10 @@ type MockPMHandler struct {
 
 func NewMockPMHandler(types ...string) *MockPMHandler {
 	return &MockPMHandler{eventTypes: types}
+}
+
+func (h *MockPMHandler) Prepare(trigger *pb.EventBook, state *TestState, event *anypb.Any) []*pb.Cover {
+	return []*pb.Cover{}
 }
 
 func (h *MockPMHandler) EventTypes() []string {
@@ -494,6 +502,23 @@ func TestCommandHandlerRouterDispatch(t *testing.T) {
 // SagaRouter Tests
 // ============================================================================
 
+
+func TestSagaDomainHandlerHasPrepare(t *testing.T) {
+	handler := NewMockSagaHandler("test.OrderCreated")
+	source := &pb.EventBook{
+		Cover: &pb.Cover{Domain: "orders"},
+		Pages: []*pb.EventPage{
+			{Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: "test.OrderCreated"}}},
+		},
+	}
+	event := source.Pages[0].GetEvent()
+
+	covers := handler.Prepare(source, event)
+	// Mock returns empty covers (no destinations needed)
+	if covers == nil {
+		t.Fatal("Prepare() should return non-nil slice")
+	}
+}
 func TestSagaRouterCreation(t *testing.T) {
 	handler := NewMockSagaHandler("test.OrderCreated")
 	router := NewSagaRouter("saga-order-fulfillment", "order", handler)
@@ -561,6 +586,23 @@ func TestSagaRouterDispatch(t *testing.T) {
 // ProcessManagerRouter Tests
 // ============================================================================
 
+
+func TestProcessManagerDomainHandlerHasPrepare(t *testing.T) {
+	handler := NewMockPMHandler("test.OrderCreated")
+	trigger := &pb.EventBook{
+		Cover: &pb.Cover{Domain: "orders"},
+		Pages: []*pb.EventPage{
+			{Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: "test.OrderCreated"}}},
+		},
+	}
+	event := trigger.Pages[0].GetEvent()
+	state := &TestState{}
+
+	covers := handler.Prepare(trigger, state, event)
+	if covers == nil {
+		t.Fatal("Prepare() should return non-nil slice")
+	}
+}
 func TestProcessManagerRouterCreation(t *testing.T) {
 	rebuild := func(events *pb.EventBook) *TestState {
 		return &TestState{Value: "pm-state"}
