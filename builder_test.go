@@ -65,6 +65,18 @@ func TestCommandBuilder_WithSequence(t *testing.T) {
 	}
 }
 
+func TestCommandBuilder_WithMergeStrategy(t *testing.T) {
+	b := &CommandBuilder{}
+	result := b.WithMergeStrategy(pb.MergeStrategy_MERGE_COMMUTATIVE)
+
+	if result != b {
+		t.Error("expected same builder returned")
+	}
+	if b.mergeStrategy != pb.MergeStrategy_MERGE_COMMUTATIVE {
+		t.Errorf("got %v, want MERGE_COMMUTATIVE", b.mergeStrategy)
+	}
+}
+
 func TestCommandBuilder_WithCommand(t *testing.T) {
 	t.Run("successful marshal", func(t *testing.T) {
 		b := &CommandBuilder{}
