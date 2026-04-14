@@ -515,12 +515,10 @@ func TestTypeNameFromURL(t *testing.T) {
 		typeURL string
 		want    string
 	}{
-		// Standard case: package.TypeName after the /
-		{"full type URL with dot", "type.googleapis.com/examples.CreateCart", "CreateCart"},
+		// Returns fully qualified type name (everything after last /)
+		{"full type URL", "type.googleapis.com/examples.CreateCart", "examples.CreateCart"},
 		{"just type name", "CreateCart", "CreateCart"},
-		// Note: current implementation splits by . first, then /
-		// For URLs without a dot after the /, returns portion after last dot
-		{"URL with slash only no package", "type.googleapis.com/CreateCart", "com/CreateCart"},
+		{"URL without package", "type.googleapis.com/CreateCart", "CreateCart"},
 		{"empty string", "", ""},
 	}
 

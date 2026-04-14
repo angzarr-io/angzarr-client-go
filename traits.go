@@ -73,7 +73,11 @@ type CommandHandlerDomainHandler[S any] interface {
 	// Used for subscription derivation and routing.
 	CommandTypes() []string
 
+	// StateRouter returns the state router used for rebuilding state from events.
+	StateRouter() *StateRouter[S]
+
 	// Rebuild reconstructs state from events.
+	// Default implementations should delegate to StateRouter().WithEventBook(events).
 	Rebuild(events *pb.EventBook) S
 
 	// Handle processes a command and returns resulting events.

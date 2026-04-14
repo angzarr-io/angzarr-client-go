@@ -284,11 +284,9 @@ func TypeURL(packageName, typeName string) string {
 	return TypeURLPrefix + packageName + "." + typeName
 }
 
-// TypeNameFromURL extracts the type name from a type URL.
+// TypeNameFromURL extracts the fully qualified type name from a type URL.
+// For "type.googleapis.com/examples.CardsDealt", returns "examples.CardsDealt".
 func TypeNameFromURL(typeURL string) string {
-	if idx := strings.LastIndex(typeURL, "."); idx >= 0 {
-		return typeURL[idx+1:]
-	}
 	if idx := strings.LastIndex(typeURL, "/"); idx >= 0 {
 		return typeURL[idx+1:]
 	}

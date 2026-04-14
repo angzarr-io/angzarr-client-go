@@ -223,14 +223,20 @@ type TestState struct {
 type MockCHHandler struct {
 	commandTypes []string
 	handleCalls  int
+	stateRouter  *StateRouter[*TestState]
 }
 
 func NewMockCHHandler(types ...string) *MockCHHandler {
-	return &MockCHHandler{commandTypes: types}
+	sr := NewStateRouter(func() *TestState { return &TestState{} })
+	return &MockCHHandler{commandTypes: types, stateRouter: sr}
 }
 
 func (h *MockCHHandler) CommandTypes() []string {
 	return h.commandTypes
+}
+
+func (h *MockCHHandler) StateRouter() *StateRouter[*TestState] {
+	return h.stateRouter
 }
 
 func (h *MockCHHandler) Rebuild(events *pb.EventBook) *TestState {
@@ -413,14 +419,27 @@ func TestCommandHandlerRouterSubscriptions(t *testing.T) {
 	}
 }
 
+func TestCommandHandlerDomainHandlerHasStateRouter(t *testing.T) {
+	handler := NewMockCHHandler("test.CreateThing")
+	sr := handler.StateRouter()
+	if sr == nil {
+		t.Fatal("StateRouter() should not return nil")
+	}
+	// StateRouter can create fresh state
+	freshState := sr.WithEventBook(nil)
+	if freshState == nil {
+		t.Fatal("StateRouter().WithEventBook(nil) should return non-nil state")
+	}
+}
+
 func TestCommandHandlerRouterRebuildState(t *testing.T) {
 	handler := NewMockCHHandler("test.CreateThing")
 	router := NewCommandHandlerRouter[*TestState]("test-ch", "things", handler)
 
 	events := &pb.EventBook{
 		Pages: []*pb.EventPage{
-			{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: 0}}},
-			{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: 1}}},
+			{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: 0}}, Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: "test.Event"}}},
+			{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: 1}}, Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: "test.Event"}}},
 		},
 	}
 
