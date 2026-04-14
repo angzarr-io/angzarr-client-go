@@ -734,20 +734,23 @@ func (r *CommandHandlerRouter[S]) dispatchCHNotification(commandAny *anypb.Any, 
 // Domain is set at construction time. No Domain() method exists,
 // enforcing single-domain constraint.
 type SagaRouter struct {
-	name    string
-	domain  string
-	handler SagaDomainHandler
+	name         string
+	domain       string
+	targetDomain string
+	handler      SagaDomainHandler
 }
 
 // NewSagaRouter creates a new saga router.
 //
 // Sagas translate events from one domain to commands for another.
-// Single domain enforced at construction.
-func NewSagaRouter(name, domain string, handler SagaDomainHandler) *SagaRouter {
+// Both input and target domains are declared at construction time.
+// The framework uses targetDomain to fetch destination sequences.
+func NewSagaRouter(name, domain, targetDomain string, handler SagaDomainHandler) *SagaRouter {
 	return &SagaRouter{
-		name:    name,
-		domain:  domain,
-		handler: handler,
+		name:         name,
+		domain:       domain,
+		targetDomain: targetDomain,
+		handler:      handler,
 	}
 }
 
@@ -759,6 +762,11 @@ func (r *SagaRouter) Name() string {
 // InputDomain returns the input domain.
 func (r *SagaRouter) InputDomain() string {
 	return r.domain
+}
+
+// TargetDomain returns the output domain (where commands are sent).
+func (r *SagaRouter) TargetDomain() string {
+	return r.targetDomain
 }
 
 // EventTypes returns event types from the handler.

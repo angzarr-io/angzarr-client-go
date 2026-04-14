@@ -285,9 +285,6 @@ func NewMockSagaHandler(types ...string) *MockSagaHandler {
 	return &MockSagaHandler{eventTypes: types}
 }
 
-func (h *MockSagaHandler) Prepare(source *pb.EventBook, event *anypb.Any) []*pb.Cover {
-	return []*pb.Cover{}
-}
 
 func (h *MockSagaHandler) EventTypes() []string {
 	return h.eventTypes
@@ -530,25 +527,9 @@ func TestCommandHandlerRouterDispatch(t *testing.T) {
 // ============================================================================
 
 
-func TestSagaDomainHandlerHasPrepare(t *testing.T) {
-	handler := NewMockSagaHandler("test.OrderCreated")
-	source := &pb.EventBook{
-		Cover: &pb.Cover{Domain: "orders"},
-		Pages: []*pb.EventPage{
-			{Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: "test.OrderCreated"}}},
-		},
-	}
-	event := source.Pages[0].GetEvent()
-
-	covers := handler.Prepare(source, event)
-	// Mock returns empty covers (no destinations needed)
-	if covers == nil {
-		t.Fatal("Prepare() should return non-nil slice")
-	}
-}
 func TestSagaRouterCreation(t *testing.T) {
 	handler := NewMockSagaHandler("test.OrderCreated")
-	router := NewSagaRouter("saga-order-fulfillment", "order", handler)
+	router := NewSagaRouter("saga-order-fulfillment", "order", "fulfillment", handler)
 
 	if router.Name() != "saga-order-fulfillment" {
 		t.Errorf("expected name 'saga-order-fulfillment', got '%s'", router.Name())
@@ -557,11 +538,15 @@ func TestSagaRouterCreation(t *testing.T) {
 	if router.InputDomain() != "order" {
 		t.Errorf("expected input domain 'order', got '%s'", router.InputDomain())
 	}
+
+	if router.TargetDomain() != "fulfillment" {
+		t.Errorf("expected target domain 'fulfillment', got '%s'", router.TargetDomain())
+	}
 }
 
 func TestSagaRouterSubscriptions(t *testing.T) {
 	handler := NewMockSagaHandler("test.OrderCreated", "test.OrderCancelled")
-	router := NewSagaRouter("saga-order-fulfillment", "order", handler)
+	router := NewSagaRouter("saga-order-fulfillment", "order", "fulfillment", handler)
 
 	subs := router.Subscriptions()
 	if len(subs) != 1 {
@@ -577,7 +562,7 @@ func TestSagaRouterSubscriptions(t *testing.T) {
 
 func TestSagaRouterDispatch(t *testing.T) {
 	handler := NewMockSagaHandler("test.OrderCreated")
-	router := NewSagaRouter("saga-order-fulfillment", "order", handler)
+	router := NewSagaRouter("saga-order-fulfillment", "order", "fulfillment", handler)
 
 	source := &pb.EventBook{
 		Cover: &pb.Cover{Domain: "order"},
@@ -801,7 +786,7 @@ func TestCommandHandlerRouterDispatchMissingCommand(t *testing.T) {
 
 func TestSagaRouterDispatchEmptySource(t *testing.T) {
 	handler := NewMockSagaHandler("test.OrderCreated")
-	router := NewSagaRouter("saga-order-fulfillment", "order", handler)
+	router := NewSagaRouter("saga-order-fulfillment", "order", "fulfillment", handler)
 
 	_, err := router.Dispatch(&pb.EventBook{}, nil)
 	if err == nil {
