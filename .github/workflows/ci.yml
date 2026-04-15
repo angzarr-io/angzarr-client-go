@@ -44,5 +44,5 @@ jobs:
 
       - name: Format check
         run: |
-          gofmt -l $(find . -name '*.go' -not -path './angzarr-core/*' -not -path './proto/*') | tee /tmp/gofmt.out
+          gofmt -l $(find . -name '*.go' -not -path './angzarr-project/*' -not -path './proto/*') | tee /tmp/gofmt.out
           test ! -s /tmp/gofmt.out
