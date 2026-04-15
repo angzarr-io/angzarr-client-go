@@ -398,8 +398,6 @@ func TestCoverW_Edition(t *testing.T) {
 	})
 }
 
-
-
 func TestCoverW_RoutingKey(t *testing.T) {
 	wrapper := NewCoverW(&pb.Cover{Domain: "payments"})
 	if got := wrapper.RoutingKey(); got != "payments" {
