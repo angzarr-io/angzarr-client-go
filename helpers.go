@@ -87,17 +87,8 @@ func RootIDHex(v interface{}) string {
 	return hex.EncodeToString(c.Root.Value)
 }
 
-// Edition returns the edition name from a Cover-bearing type, defaulting to DefaultEdition.
-func Edition(v interface{}) string {
-	c := CoverOf(v)
-	if c == nil || c.Edition == nil || c.Edition.Name == "" {
-		return DefaultEdition
-	}
-	return c.Edition.Name
-}
-
-// EditionOpt returns the edition name as a pointer, nil if not set.
-func EditionOpt(v interface{}) *string {
+// Edition returns the edition name from a Cover-bearing type, or nil if not set.
+func Edition(v interface{}) *string {
 	c := CoverOf(v)
 	if c == nil || c.Edition == nil || c.Edition.Name == "" {
 		return nil

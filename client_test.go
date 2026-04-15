@@ -223,6 +223,25 @@ func TestCommandHandlerClient_Handle(t *testing.T) {
 		}
 	})
 
+	t.Run("sets cascade error mode to fail fast", func(t *testing.T) {
+		var capturedRequest *pb.CommandRequest
+		mock := &mockCHCoordinatorServiceClient{
+			handleCommandFn: func(ctx context.Context, in *pb.CommandRequest, opts ...grpc.CallOption) (*pb.CommandResponse, error) {
+				capturedRequest = in
+				return &pb.CommandResponse{}, nil
+			},
+		}
+		client := &CommandHandlerClient{inner: mock}
+
+		_, err := client.Handle(context.Background(), &pb.CommandBook{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if capturedRequest.CascadeErrorMode != pb.CascadeErrorMode_CASCADE_ERROR_FAIL_FAST {
+			t.Errorf("expected CASCADE_ERROR_FAIL_FAST, got %v", capturedRequest.CascadeErrorMode)
+		}
+	})
+
 	t.Run("grpc error", func(t *testing.T) {
 		mock := &mockCHCoordinatorServiceClient{
 			handleCommandFn: func(ctx context.Context, in *pb.CommandRequest, opts ...grpc.CallOption) (*pb.CommandResponse, error) {

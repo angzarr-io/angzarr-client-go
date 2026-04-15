@@ -201,8 +201,9 @@ func CommandHandlerClientFromConn(conn *grpc.ClientConn) *CommandHandlerClient {
 // Convenience method that wraps CommandBook in CommandRequest with default sync mode.
 func (c *CommandHandlerClient) Handle(ctx context.Context, cmd *pb.CommandBook) (*pb.CommandResponse, error) {
 	request := &pb.CommandRequest{
-		Command:  cmd,
-		SyncMode: pb.SyncMode_SYNC_MODE_ASYNC,
+		Command:          cmd,
+		SyncMode:         pb.SyncMode_SYNC_MODE_ASYNC,
+		CascadeErrorMode: pb.CascadeErrorMode_CASCADE_ERROR_FAIL_FAST,
 	}
 	return c.HandleCommand(ctx, request)
 }

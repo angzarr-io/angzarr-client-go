@@ -194,61 +194,34 @@ func TestRootIDHex(t *testing.T) {
 }
 
 func TestEdition(t *testing.T) {
-	tests := []struct {
-		name  string
-		input interface{}
-		want  string
-	}{
-		{"with edition", &pb.Cover{Edition: &pb.Edition{Name: "test-edition"}}, "test-edition"},
-		{"empty edition name", &pb.Cover{Edition: &pb.Edition{Name: ""}}, DefaultEdition},
-		{"nil edition", &pb.Cover{}, DefaultEdition},
-		{"nil cover", nil, DefaultEdition},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := Edition(tt.input)
-			if got != tt.want {
-				t.Errorf("got %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestEditionOpt(t *testing.T) {
 	t.Run("with edition", func(t *testing.T) {
 		cover := &pb.Cover{Edition: &pb.Edition{Name: "test-edition"}}
-		got := EditionOpt(cover)
-		if got == nil {
-			t.Fatal("expected non-nil result")
-		}
-		if *got != "test-edition" {
-			t.Errorf("got %q, want %q", *got, "test-edition")
+		got := Edition(cover)
+		if got == nil || *got != "test-edition" {
+			t.Errorf("expected 'test-edition', got %v", got)
 		}
 	})
 
-	t.Run("empty edition name", func(t *testing.T) {
+	t.Run("empty edition name returns nil", func(t *testing.T) {
 		cover := &pb.Cover{Edition: &pb.Edition{Name: ""}}
-		got := EditionOpt(cover)
-		if got != nil {
-			t.Error("expected nil for empty edition name")
+		if got := Edition(cover); got != nil {
+			t.Errorf("expected nil, got %q", *got)
 		}
 	})
 
-	t.Run("nil edition", func(t *testing.T) {
+	t.Run("nil edition returns nil", func(t *testing.T) {
 		cover := &pb.Cover{}
-		got := EditionOpt(cover)
-		if got != nil {
-			t.Error("expected nil for nil edition")
+		if got := Edition(cover); got != nil {
+			t.Errorf("expected nil, got %q", *got)
 		}
 	})
 
-	t.Run("nil cover", func(t *testing.T) {
-		got := EditionOpt(nil)
-		if got != nil {
-			t.Error("expected nil for nil input")
+	t.Run("nil cover returns nil", func(t *testing.T) {
+		if got := Edition(nil); got != nil {
+			t.Errorf("expected nil, got %q", *got)
 		}
 	})
+
 }
 
 func TestRoutingKey(t *testing.T) {

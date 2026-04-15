@@ -16,6 +16,7 @@ type CommandBuilder struct {
 	root          *uuid.UUID
 	correlationID string
 	sequence      uint32
+	sequenceSet   bool
 	mergeStrategy pb.MergeStrategy
 	typeURL       string
 	payload       []byte
@@ -48,6 +49,7 @@ func (b *CommandBuilder) WithCorrelationID(id string) *CommandBuilder {
 // WithSequence sets the expected sequence number for optimistic locking.
 func (b *CommandBuilder) WithSequence(seq uint32) *CommandBuilder {
 	b.sequence = seq
+	b.sequenceSet = true
 	return b
 }
 
@@ -79,6 +81,9 @@ func (b *CommandBuilder) Build() (*pb.CommandBook, error) {
 	}
 	if b.payload == nil {
 		return nil, InvalidArgumentError("command payload not set")
+	}
+	if !b.sequenceSet {
+		return nil, InvalidArgumentError("sequence not set (call WithSequence)")
 	}
 
 	correlationID := b.correlationID
