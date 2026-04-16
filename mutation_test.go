@@ -1,3 +1,5 @@
+//go:build mutation
+
 package angzarr
 
 import (

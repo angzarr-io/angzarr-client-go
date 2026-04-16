@@ -24,7 +24,7 @@ coverage: proto
     go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out
 
 mutation-test: proto
-    go test -v -run TestMutation -count=1 -timeout 30m ./...
+    go test -v -tags=mutation -run TestMutation -count=1 -timeout 30m ./...
 
 # Format check (gofmt)
 fmt:
