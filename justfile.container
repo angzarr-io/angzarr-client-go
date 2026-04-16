@@ -23,11 +23,8 @@ test:
 coverage:
     go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out
 
-mutate:
-    go install github.com/go-gremlins/gremlins/cmd/gremlins@latest && gremlins unleash --timeout-coefficient 10 --exclude-files="proto/" .
-
-mutate-dry:
-    go install github.com/go-gremlins/gremlins/cmd/gremlins@latest && gremlins unleash --dry-run --exclude-files="proto/" .
+mutation-test:
+    go test -v -run TestMutation -count=1 -timeout 30m ./...
 
 # Format check (gofmt)
 fmt:

@@ -46,3 +46,33 @@ jobs:
         run: |
           gofmt -l $(find . -name '*.go' -not -path './angzarr-project/*' -not -path './proto/*') | tee /tmp/gofmt.out
           test ! -s /tmp/gofmt.out
+
+  mutation-test:
+    name: Mutation Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install buf CLI
+        uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+
+      - name: Mutation test
+        run: just -f justfile.container mutation-test
