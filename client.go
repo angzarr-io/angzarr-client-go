@@ -356,10 +356,11 @@ func (c *SpeculativeClient) Close() error {
 	return nil
 }
 
-// DomainClient combines command handler and query clients for a single domain.
+// DomainClient combines command handler, query, and speculative clients for a single domain.
 type DomainClient struct {
 	CommandHandler *CommandHandlerClient
 	Query          *QueryClient
+	Speculative    *SpeculativeClient
 	conn           *grpc.ClientConn
 }
 
@@ -383,6 +384,7 @@ func NewDomainClientWithRetry(endpoint string, retry RetryPolicy) (*DomainClient
 	return &DomainClient{
 		CommandHandler: CommandHandlerClientFromConn(conn),
 		Query:          QueryClientFromConn(conn),
+		Speculative:    SpeculativeClientFromConn(conn),
 		conn:           conn,
 	}, nil
 }
@@ -401,6 +403,7 @@ func DomainClientFromConn(conn *grpc.ClientConn) *DomainClient {
 	return &DomainClient{
 		CommandHandler: CommandHandlerClientFromConn(conn),
 		Query:          QueryClientFromConn(conn),
+		Speculative:    SpeculativeClientFromConn(conn),
 		conn:           conn,
 	}
 }
@@ -452,7 +455,8 @@ func (c *DomainClient) Close() error {
 	return nil
 }
 
-// Client combines command handler, query, and speculative clients.
+// Deprecated: Client is deprecated. Use DomainClient instead, which now includes
+// Speculative sub-client. Client will be removed in a future release.
 type Client struct {
 	CommandHandler *CommandHandlerClient
 	Query          *QueryClient

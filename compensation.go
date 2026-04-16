@@ -74,6 +74,20 @@ func NewCompensationContext(notification *pb.Notification) *CompensationContext 
 	return ctx
 }
 
+// DispatchKey returns a routing key in the format "domain/command" for rejection handlers.
+// Returns empty string if the rejected command is not available.
+func (c *CompensationContext) DispatchKey() string {
+	if c.RejectedCommand == nil || c.RejectedCommand.Cover == nil {
+		return ""
+	}
+	domain := c.RejectedCommand.Cover.Domain
+	cmdType := c.RejectedCommandType()
+	if domain == "" || cmdType == "" {
+		return ""
+	}
+	return domain + "/" + cmdType
+}
+
 // RejectedCommandType returns the type URL of the rejected command, if available.
 func (c *CompensationContext) RejectedCommandType() string {
 	if c.RejectedCommand != nil && len(c.RejectedCommand.Pages) > 0 {
