@@ -17,13 +17,13 @@ proto:
 build: proto
     go build -ldflags '{{LDFLAGS}}' ./...
 
-test:
+test: proto
     go test -v ./...
 
-coverage:
+coverage: proto
     go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out
 
-mutation-test:
+mutation-test: proto
     go test -v -run TestMutation -count=1 -timeout 30m ./...
 
 # Format check (gofmt)
