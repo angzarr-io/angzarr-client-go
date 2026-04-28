@@ -65,6 +65,18 @@ func TestCommandBuilder_WithSequence(t *testing.T) {
 	}
 }
 
+func TestCommandBuilder_WithMergeStrategy(t *testing.T) {
+	b := &CommandBuilder{}
+	result := b.WithMergeStrategy(pb.MergeStrategy_MERGE_COMMUTATIVE)
+
+	if result != b {
+		t.Error("expected same builder returned")
+	}
+	if b.mergeStrategy != pb.MergeStrategy_MERGE_COMMUTATIVE {
+		t.Errorf("got %v, want MERGE_COMMUTATIVE", b.mergeStrategy)
+	}
+}
+
 func TestCommandBuilder_WithCommand(t *testing.T) {
 	t.Run("successful marshal", func(t *testing.T) {
 		b := &CommandBuilder{}
@@ -113,6 +125,7 @@ func TestCommandBuilder_Build(t *testing.T) {
 			domain:        "orders",
 			root:          &root,
 			correlationID: "corr-123",
+			sequenceSet:   true,
 			sequence:      5,
 			typeURL:       "type.googleapis.com/test.Command",
 			payload:       payload,
@@ -147,10 +160,11 @@ func TestCommandBuilder_Build(t *testing.T) {
 		payload, _ := proto.Marshal(msg)
 
 		b := &CommandBuilder{
-			domain:  "orders",
-			root:    nil,
-			typeURL: "type.googleapis.com/test.Command",
-			payload: payload,
+			domain:      "orders",
+			root:        nil,
+			sequenceSet: true,
+			typeURL:     "type.googleapis.com/test.Command",
+			payload:     payload,
 		}
 
 		cmd, err := b.Build()
@@ -163,6 +177,44 @@ func TestCommandBuilder_Build(t *testing.T) {
 		// Should auto-generate correlation ID
 		if cmd.Cover.CorrelationId == "" {
 			t.Error("expected auto-generated correlation ID")
+		}
+	})
+
+	t.Run("missing sequence", func(t *testing.T) {
+		msg := wrapperspb.String("test")
+		payload, _ := proto.Marshal(msg)
+
+		b := &CommandBuilder{
+			domain:  "orders",
+			typeURL: "type.googleapis.com/test.Command",
+			payload: payload,
+			// sequenceSet NOT set — should fail
+		}
+
+		_, err := b.Build()
+		if err == nil {
+			t.Error("expected error for missing sequence")
+		}
+	})
+
+	t.Run("sequence zero is valid when explicitly set", func(t *testing.T) {
+		msg := wrapperspb.String("test")
+		payload, _ := proto.Marshal(msg)
+
+		b := &CommandBuilder{
+			domain:      "orders",
+			sequenceSet: true,
+			sequence:    0,
+			typeURL:     "type.googleapis.com/test.Command",
+			payload:     payload,
+		}
+
+		cmd, err := b.Build()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cmd.Pages[0].GetHeader().GetSequence() != 0 {
+			t.Errorf("got sequence %d, want 0", cmd.Pages[0].GetHeader().GetSequence())
 		}
 	})
 

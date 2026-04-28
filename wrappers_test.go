@@ -155,25 +155,34 @@ func TestEventBookW_RootUUID(t *testing.T) {
 }
 
 func TestEventBookW_Edition(t *testing.T) {
-	tests := []struct {
-		name  string
-		cover *pb.Cover
-		want  string
-	}{
-		{"with edition", &pb.Cover{Edition: &pb.Edition{Name: "v2"}}, "v2"},
-		{"empty edition", &pb.Cover{Edition: &pb.Edition{Name: ""}}, DefaultEdition},
-		{"nil edition", &pb.Cover{}, DefaultEdition},
-		{"nil cover", nil, DefaultEdition},
-	}
+	t.Run("with edition", func(t *testing.T) {
+		wrapper := NewEventBookW(&pb.EventBook{Cover: &pb.Cover{Edition: &pb.Edition{Name: "v2"}}})
+		got := wrapper.Edition()
+		if got == nil || *got != "v2" {
+			t.Errorf("expected 'v2', got %v", got)
+		}
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			wrapper := NewEventBookW(&pb.EventBook{Cover: tt.cover})
-			if got := wrapper.Edition(); got != tt.want {
-				t.Errorf("got %q, want %q", got, tt.want)
-			}
-		})
-	}
+	t.Run("empty edition returns nil", func(t *testing.T) {
+		wrapper := NewEventBookW(&pb.EventBook{Cover: &pb.Cover{Edition: &pb.Edition{Name: ""}}})
+		if got := wrapper.Edition(); got != nil {
+			t.Errorf("expected nil, got %q", *got)
+		}
+	})
+
+	t.Run("nil edition returns nil", func(t *testing.T) {
+		wrapper := NewEventBookW(&pb.EventBook{Cover: &pb.Cover{}})
+		if got := wrapper.Edition(); got != nil {
+			t.Errorf("expected nil, got %q", *got)
+		}
+	})
+
+	t.Run("nil cover returns nil", func(t *testing.T) {
+		wrapper := NewEventBookW(&pb.EventBook{})
+		if got := wrapper.Edition(); got != nil {
+			t.Errorf("expected nil, got %q", *got)
+		}
+	})
 }
 
 func TestEventBookW_RoutingKey(t *testing.T) {
@@ -366,39 +375,25 @@ func TestCoverW_RootIDHex(t *testing.T) {
 }
 
 func TestCoverW_Edition(t *testing.T) {
-	tests := []struct {
-		name    string
-		edition *pb.Edition
-		want    string
-	}{
-		{"with edition", &pb.Edition{Name: "speculative"}, "speculative"},
-		{"empty edition", &pb.Edition{Name: ""}, DefaultEdition},
-		{"nil edition", nil, DefaultEdition},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			wrapper := NewCoverW(&pb.Cover{Edition: tt.edition})
-			if got := wrapper.Edition(); got != tt.want {
-				t.Errorf("got %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestCoverW_EditionOpt(t *testing.T) {
 	t.Run("with edition", func(t *testing.T) {
-		wrapper := NewCoverW(&pb.Cover{Edition: &pb.Edition{Name: "branch-a"}})
-		got := wrapper.EditionOpt()
-		if got == nil || *got != "branch-a" {
-			t.Errorf("expected 'branch-a', got %v", got)
+		wrapper := NewCoverW(&pb.Cover{Edition: &pb.Edition{Name: "speculative"}})
+		got := wrapper.Edition()
+		if got == nil || *got != "speculative" {
+			t.Errorf("expected 'speculative', got %v", got)
 		}
 	})
 
-	t.Run("nil edition", func(t *testing.T) {
+	t.Run("empty edition returns nil", func(t *testing.T) {
+		wrapper := NewCoverW(&pb.Cover{Edition: &pb.Edition{Name: ""}})
+		if got := wrapper.Edition(); got != nil {
+			t.Errorf("expected nil, got %q", *got)
+		}
+	})
+
+	t.Run("nil edition returns nil", func(t *testing.T) {
 		wrapper := NewCoverW(&pb.Cover{})
-		if got := wrapper.EditionOpt(); got != nil {
-			t.Error("expected nil")
+		if got := wrapper.Edition(); got != nil {
+			t.Errorf("expected nil, got %q", *got)
 		}
 	})
 }

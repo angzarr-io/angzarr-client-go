@@ -73,8 +73,17 @@ type CommandHandlerDomainHandler[S any] interface {
 	// Used for subscription derivation and routing.
 	CommandTypes() []string
 
+	// StateRouter returns the state router used for rebuilding state from events.
+	StateRouter() *StateRouter[S]
+
 	// Rebuild reconstructs state from events.
+	// Default implementations should delegate to StateRouter().WithEventBook(events).
 	Rebuild(events *pb.EventBook) S
+
+	// HandleFact processes injected facts and returns the resulting EventBook.
+	// Facts are always accepted (cannot be rejected). Override to emit
+	// additional events or augment facts. Default: pass-through.
+	HandleFact(facts *pb.EventBook, state S) (*pb.EventBook, error)
 
 	// Handle processes a command and returns resulting events.
 	// The handler should dispatch internally based on payload.TypeUrl.
@@ -189,6 +198,10 @@ type SagaDomainHandler interface {
 type ProcessManagerDomainHandler[S any] interface {
 	// EventTypes returns the fully-qualified event type names this handler processes.
 	EventTypes() []string
+
+	// Prepare returns the covers for destinations needed to handle this event.
+	// The framework fetches these destinations before calling Handle.
+	Prepare(trigger *pb.EventBook, state S, event *anypb.Any) []*pb.Cover
 
 	// Handle processes the event and produces commands and PM events.
 	// Destinations provide sequences for command stamping (not EventBook data).

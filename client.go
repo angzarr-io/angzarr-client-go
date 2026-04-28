@@ -99,8 +99,19 @@ type QueryClient struct {
 }
 
 // NewQueryClient connects to an event query service at the given endpoint.
+// Uses the default retry policy (exponential backoff, 10 attempts).
 func NewQueryClient(endpoint string) (*QueryClient, error) {
-	conn, err := grpc.NewClient(formatEndpoint(endpoint), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	return NewQueryClientWithRetry(endpoint, DefaultRetryPolicy())
+}
+
+// NewQueryClientWithRetry connects with a custom retry policy.
+func NewQueryClientWithRetry(endpoint string, retry RetryPolicy) (*QueryClient, error) {
+	var conn *grpc.ClientConn
+	err := retry.Execute(func() error {
+		var dialErr error
+		conn, dialErr = grpc.NewClient(formatEndpoint(endpoint), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		return dialErr
+	})
 	if err != nil {
 		return nil, TransportError(err)
 	}
@@ -169,8 +180,19 @@ type CommandHandlerClient struct {
 }
 
 // NewCommandHandlerClient connects to a command handler at the given endpoint.
+// Uses the default retry policy (exponential backoff, 10 attempts).
 func NewCommandHandlerClient(endpoint string) (*CommandHandlerClient, error) {
-	conn, err := grpc.NewClient(formatEndpoint(endpoint), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	return NewCommandHandlerClientWithRetry(endpoint, DefaultRetryPolicy())
+}
+
+// NewCommandHandlerClientWithRetry connects with a custom retry policy.
+func NewCommandHandlerClientWithRetry(endpoint string, retry RetryPolicy) (*CommandHandlerClient, error) {
+	var conn *grpc.ClientConn
+	err := retry.Execute(func() error {
+		var dialErr error
+		conn, dialErr = grpc.NewClient(formatEndpoint(endpoint), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		return dialErr
+	})
 	if err != nil {
 		return nil, TransportError(err)
 	}
@@ -201,8 +223,9 @@ func CommandHandlerClientFromConn(conn *grpc.ClientConn) *CommandHandlerClient {
 // Convenience method that wraps CommandBook in CommandRequest with default sync mode.
 func (c *CommandHandlerClient) Handle(ctx context.Context, cmd *pb.CommandBook) (*pb.CommandResponse, error) {
 	request := &pb.CommandRequest{
-		Command:  cmd,
-		SyncMode: pb.SyncMode_SYNC_MODE_ASYNC,
+		Command:          cmd,
+		SyncMode:         pb.SyncMode_SYNC_MODE_ASYNC,
+		CascadeErrorMode: pb.CascadeErrorMode_CASCADE_ERROR_FAIL_FAST,
 	}
 	return c.HandleCommand(ctx, request)
 }
@@ -244,8 +267,19 @@ type SpeculativeClient struct {
 }
 
 // NewSpeculativeClient connects to coordinator services at the given endpoint.
+// Uses the default retry policy (exponential backoff, 10 attempts).
 func NewSpeculativeClient(endpoint string) (*SpeculativeClient, error) {
-	conn, err := grpc.NewClient(formatEndpoint(endpoint), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	return NewSpeculativeClientWithRetry(endpoint, DefaultRetryPolicy())
+}
+
+// NewSpeculativeClientWithRetry connects with a custom retry policy.
+func NewSpeculativeClientWithRetry(endpoint string, retry RetryPolicy) (*SpeculativeClient, error) {
+	var conn *grpc.ClientConn
+	err := retry.Execute(func() error {
+		var dialErr error
+		conn, dialErr = grpc.NewClient(formatEndpoint(endpoint), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		return dialErr
+	})
 	if err != nil {
 		return nil, TransportError(err)
 	}
@@ -330,8 +364,19 @@ type DomainClient struct {
 }
 
 // NewDomainClient connects to a domain's coordinator at the given endpoint.
+// Uses the default retry policy (exponential backoff, 10 attempts).
 func NewDomainClient(endpoint string) (*DomainClient, error) {
-	conn, err := grpc.NewClient(formatEndpoint(endpoint), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	return NewDomainClientWithRetry(endpoint, DefaultRetryPolicy())
+}
+
+// NewDomainClientWithRetry connects with a custom retry policy.
+func NewDomainClientWithRetry(endpoint string, retry RetryPolicy) (*DomainClient, error) {
+	var conn *grpc.ClientConn
+	err := retry.Execute(func() error {
+		var dialErr error
+		conn, dialErr = grpc.NewClient(formatEndpoint(endpoint), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		return dialErr
+	})
 	if err != nil {
 		return nil, TransportError(err)
 	}

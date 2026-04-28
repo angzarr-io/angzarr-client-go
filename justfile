@@ -67,3 +67,11 @@ mutate-dry:
 
 clean:
     rm -f "{{ROOT}}/coverage.out"
+
+# Check formatting
+fmt:
+    just _container fmt
+
+# Auto-format code
+fmt-fix:
+    just _container fmt-fix

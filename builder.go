@@ -16,6 +16,8 @@ type CommandBuilder struct {
 	root          *uuid.UUID
 	correlationID string
 	sequence      uint32
+	sequenceSet   bool
+	mergeStrategy pb.MergeStrategy
 	typeURL       string
 	payload       []byte
 	err           error
@@ -47,6 +49,13 @@ func (b *CommandBuilder) WithCorrelationID(id string) *CommandBuilder {
 // WithSequence sets the expected sequence number for optimistic locking.
 func (b *CommandBuilder) WithSequence(seq uint32) *CommandBuilder {
 	b.sequence = seq
+	b.sequenceSet = true
+	return b
+}
+
+// WithMergeStrategy sets the merge strategy for conflict resolution.
+func (b *CommandBuilder) WithMergeStrategy(strategy pb.MergeStrategy) *CommandBuilder {
+	b.mergeStrategy = strategy
 	return b
 }
 
@@ -73,6 +82,9 @@ func (b *CommandBuilder) Build() (*pb.CommandBook, error) {
 	if b.payload == nil {
 		return nil, InvalidArgumentError("command payload not set")
 	}
+	if !b.sequenceSet {
+		return nil, InvalidArgumentError("sequence not set (call WithSequence)")
+	}
 
 	correlationID := b.correlationID
 	if correlationID == "" {
@@ -90,8 +102,9 @@ func (b *CommandBuilder) Build() (*pb.CommandBook, error) {
 	return &pb.CommandBook{
 		Cover: cover,
 		Pages: []*pb.CommandPage{{
-			Header:  &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: b.sequence}},
-			Payload: &pb.CommandPage_Command{Command: &anypb.Any{TypeUrl: b.typeURL, Value: b.payload}},
+			Header:        &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: b.sequence}},
+			Payload:       &pb.CommandPage_Command{Command: &anypb.Any{TypeUrl: b.typeURL, Value: b.payload}},
+			MergeStrategy: b.mergeStrategy,
 		}},
 	}, nil
 }

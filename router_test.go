@@ -223,14 +223,25 @@ type TestState struct {
 type MockCHHandler struct {
 	commandTypes []string
 	handleCalls  int
+	stateRouter  *StateRouter[*TestState]
 }
 
 func NewMockCHHandler(types ...string) *MockCHHandler {
-	return &MockCHHandler{commandTypes: types}
+	sr := NewStateRouter(func() *TestState { return &TestState{} })
+	return &MockCHHandler{commandTypes: types, stateRouter: sr}
 }
 
 func (h *MockCHHandler) CommandTypes() []string {
 	return h.commandTypes
+}
+
+func (h *MockCHHandler) StateRouter() *StateRouter[*TestState] {
+	return h.stateRouter
+}
+
+func (h *MockCHHandler) HandleFact(facts *pb.EventBook, state *TestState) (*pb.EventBook, error) {
+	// Default: pass-through
+	return facts, nil
 }
 
 func (h *MockCHHandler) Rebuild(events *pb.EventBook) *TestState {
@@ -315,6 +326,10 @@ type MockPMHandler struct {
 
 func NewMockPMHandler(types ...string) *MockPMHandler {
 	return &MockPMHandler{eventTypes: types}
+}
+
+func (h *MockPMHandler) Prepare(trigger *pb.EventBook, state *TestState, event *anypb.Any) []*pb.Cover {
+	return []*pb.Cover{}
 }
 
 func (h *MockPMHandler) EventTypes() []string {
@@ -413,14 +428,48 @@ func TestCommandHandlerRouterSubscriptions(t *testing.T) {
 	}
 }
 
+func TestCommandHandlerDomainHandlerHasStateRouter(t *testing.T) {
+	handler := NewMockCHHandler("test.CreateThing")
+	sr := handler.StateRouter()
+	if sr == nil {
+		t.Fatal("StateRouter() should not return nil")
+	}
+	// StateRouter can create fresh state
+	freshState := sr.WithEventBook(nil)
+	if freshState == nil {
+		t.Fatal("StateRouter().WithEventBook(nil) should return non-nil state")
+	}
+}
+
+func TestCommandHandlerDomainHandlerHasHandleFact(t *testing.T) {
+	handler := NewMockCHHandler("test.CreateThing")
+	facts := &pb.EventBook{
+		Pages: []*pb.EventPage{
+			{Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: "test.FactEvent"}}},
+		},
+	}
+	state := &TestState{}
+
+	result, err := handler.HandleFact(facts, state)
+	if err != nil {
+		t.Fatalf("HandleFact should not error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("HandleFact should return non-nil EventBook")
+	}
+	// Default: pass-through returns original facts
+	if len(result.GetPages()) != len(facts.GetPages()) {
+		t.Errorf("expected %d pages, got %d", len(facts.GetPages()), len(result.GetPages()))
+	}
+}
 func TestCommandHandlerRouterRebuildState(t *testing.T) {
 	handler := NewMockCHHandler("test.CreateThing")
 	router := NewCommandHandlerRouter[*TestState]("test-ch", "things", handler)
 
 	events := &pb.EventBook{
 		Pages: []*pb.EventPage{
-			{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: 0}}},
-			{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: 1}}},
+			{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: 0}}, Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: "test.Event"}}},
+			{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: 1}}, Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: "test.Event"}}},
 		},
 	}
 
@@ -477,7 +526,7 @@ func TestCommandHandlerRouterDispatch(t *testing.T) {
 
 func TestSagaRouterCreation(t *testing.T) {
 	handler := NewMockSagaHandler("test.OrderCreated")
-	router := NewSagaRouter("saga-order-fulfillment", "order", handler)
+	router := NewSagaRouter("saga-order-fulfillment", "order", "fulfillment", handler)
 
 	if router.Name() != "saga-order-fulfillment" {
 		t.Errorf("expected name 'saga-order-fulfillment', got '%s'", router.Name())
@@ -486,11 +535,15 @@ func TestSagaRouterCreation(t *testing.T) {
 	if router.InputDomain() != "order" {
 		t.Errorf("expected input domain 'order', got '%s'", router.InputDomain())
 	}
+
+	if router.TargetDomain() != "fulfillment" {
+		t.Errorf("expected target domain 'fulfillment', got '%s'", router.TargetDomain())
+	}
 }
 
 func TestSagaRouterSubscriptions(t *testing.T) {
 	handler := NewMockSagaHandler("test.OrderCreated", "test.OrderCancelled")
-	router := NewSagaRouter("saga-order-fulfillment", "order", handler)
+	router := NewSagaRouter("saga-order-fulfillment", "order", "fulfillment", handler)
 
 	subs := router.Subscriptions()
 	if len(subs) != 1 {
@@ -506,7 +559,7 @@ func TestSagaRouterSubscriptions(t *testing.T) {
 
 func TestSagaRouterDispatch(t *testing.T) {
 	handler := NewMockSagaHandler("test.OrderCreated")
-	router := NewSagaRouter("saga-order-fulfillment", "order", handler)
+	router := NewSagaRouter("saga-order-fulfillment", "order", "fulfillment", handler)
 
 	source := &pb.EventBook{
 		Cover: &pb.Cover{Domain: "order"},
@@ -542,6 +595,22 @@ func TestSagaRouterDispatch(t *testing.T) {
 // ProcessManagerRouter Tests
 // ============================================================================
 
+func TestProcessManagerDomainHandlerHasPrepare(t *testing.T) {
+	handler := NewMockPMHandler("test.OrderCreated")
+	trigger := &pb.EventBook{
+		Cover: &pb.Cover{Domain: "orders"},
+		Pages: []*pb.EventPage{
+			{Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: "test.OrderCreated"}}},
+		},
+	}
+	event := trigger.Pages[0].GetEvent()
+	state := &TestState{}
+
+	covers := handler.Prepare(trigger, state, event)
+	if covers == nil {
+		t.Fatal("Prepare() should return non-nil slice")
+	}
+}
 func TestProcessManagerRouterCreation(t *testing.T) {
 	rebuild := func(events *pb.EventBook) *TestState {
 		return &TestState{Value: "pm-state"}
@@ -713,7 +782,7 @@ func TestCommandHandlerRouterDispatchMissingCommand(t *testing.T) {
 
 func TestSagaRouterDispatchEmptySource(t *testing.T) {
 	handler := NewMockSagaHandler("test.OrderCreated")
-	router := NewSagaRouter("saga-order-fulfillment", "order", handler)
+	router := NewSagaRouter("saga-order-fulfillment", "order", "fulfillment", handler)
 
 	_, err := router.Dispatch(&pb.EventBook{}, nil)
 	if err == nil {

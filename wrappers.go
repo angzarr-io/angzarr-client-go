@@ -59,16 +59,8 @@ func (w *CoverW) RootIDHex() string {
 	return hex.EncodeToString(w.Cover.Root.Value)
 }
 
-// Edition returns the edition name, defaulting to DefaultEdition.
-func (w *CoverW) Edition() string {
-	if w.Cover == nil || w.Cover.Edition == nil || w.Cover.Edition.Name == "" {
-		return DefaultEdition
-	}
-	return w.Cover.Edition.Name
-}
-
-// EditionOpt returns the edition name as a pointer, nil if not set.
-func (w *CoverW) EditionOpt() *string {
+// Edition returns the edition name, or nil if not set.
+func (w *CoverW) Edition() *string {
 	if w.Cover == nil || w.Cover.Edition == nil || w.Cover.Edition.Name == "" {
 		return nil
 	}
@@ -167,13 +159,13 @@ func (w *EventBookW) RootIDHex() string {
 	return hex.EncodeToString(c.Root.Value)
 }
 
-// Edition returns the edition name, defaulting to DefaultEdition.
-func (w *EventBookW) Edition() string {
+// Edition returns the edition name, or nil if not set.
+func (w *EventBookW) Edition() *string {
 	c := w.cover()
 	if c == nil || c.Edition == nil || c.Edition.Name == "" {
-		return DefaultEdition
+		return nil
 	}
-	return c.Edition.Name
+	return &c.Edition.Name
 }
 
 // RoutingKey computes the bus routing key.
