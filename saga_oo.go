@@ -81,12 +81,6 @@ func (s *SagaBase) OutputDomain() string {
 	return s.outputDomain
 }
 
-// Prepares registers a prepare handler for an event type.
-//
-// The handler function must have signature: func(*EventType) []*pb.Cover
-// where EventType is a protobuf message type. The event type is automatically
-// extracted via proto reflection - no type name string needed.
-//
 // Handles registers an event handler.
 //
 // The handler function signature: func(*EventType) (*pb.CommandBook, error)
