@@ -199,6 +199,10 @@ type ProcessManagerDomainHandler[S any] interface {
 	// EventTypes returns the fully-qualified event type names this handler processes.
 	EventTypes() []string
 
+	// Prepare returns the covers for destinations needed to handle this event.
+	// The framework fetches these destinations before calling Handle.
+	Prepare(trigger *pb.EventBook, state S, event *anypb.Any) []*pb.Cover
+
 	// Handle processes the event and produces commands and PM events.
 	// Destinations provide sequences for command stamping (not EventBook data).
 	Handle(
