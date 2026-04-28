@@ -44,7 +44,6 @@ import (
 var (
 	handlerPattern  = regexp.MustCompile(`@handler\s+(\w+)`)
 	reactsPattern   = regexp.MustCompile(`@reacts\s+(\w+)(?:\s+domain=(\w+))?`)
-	preparesPattern = regexp.MustCompile(`@prepares\s+(\w+)`)
 	rejectedPattern = regexp.MustCompile(`@rejected\s+domain=(\w+)\s+command=(\w+)`)
 	projectsPattern = regexp.MustCompile(`@projects\s+(\w+)`)
 )
@@ -63,10 +62,9 @@ const (
 type HandlerInfo struct {
 	MethodName  string
 	CommandType string // For @handler
-	EventType   string // For @reacts, @prepares, @projects
+	EventType   string // For @reacts, @projects
 	Domain      string // For @reacts with domain, @rejected
 	Command     string // For @rejected
-	IsPrepare   bool
 	IsRejected  bool
 }
 
@@ -224,15 +222,6 @@ func parseFile(file *ast.File, info *TypeInfo, component ComponentType) error {
 				info.Handlers = append(info.Handlers, h)
 			}
 
-			// @prepares EventType
-			if matches := preparesPattern.FindStringSubmatch(text); len(matches) > 1 {
-				info.Handlers = append(info.Handlers, HandlerInfo{
-					MethodName: fn.Name.Name,
-					EventType:  matches[1],
-					IsPrepare:  true,
-				})
-			}
-
 			// @rejected domain=X command=Y
 			if matches := rejectedPattern.FindStringSubmatch(text); len(matches) > 2 {
 				info.Handlers = append(info.Handlers, HandlerInfo{
@@ -349,9 +338,8 @@ import (
 // New{{.TypeName}}Router creates an EventRouter from the {{.TypeName}}'s annotated methods.
 func New{{.TypeName}}Router(saga *{{.TypeName}}) *angzarr.EventRouter {
 	return angzarr.NewEventRouter("{{.Domain}}").
-		Domain(saga.InputDomain()){{range .Handlers}}{{if .IsPrepare}}.
-		Prepare("{{.EventType}}", wrap{{.MethodName}}Prepare(saga)){{else}}{{if .EventType}}.
-		On("{{.EventType}}", wrap{{.MethodName}}(saga)){{end}}{{end}}{{end}}
+		Domain(saga.InputDomain()){{range .Handlers}}{{if .EventType}}.
+		On("{{.EventType}}", wrap{{.MethodName}}(saga)){{end}}{{end}}
 }
 `
 
