@@ -81,12 +81,6 @@ func (s *SagaBase) OutputDomain() string {
 	return s.outputDomain
 }
 
-// Prepares registers a prepare handler for an event type.
-//
-// The handler function must have signature: func(*EventType) []*pb.Cover
-// where EventType is a protobuf message type. The event type is automatically
-// extracted via proto reflection - no type name string needed.
-//
 // Handles registers an event handler.
 //
 // The handler function signature: func(*EventType) (*pb.CommandBook, error)
@@ -256,8 +250,8 @@ func (s *SagaBase) ClearEvents() {
 }
 
 // Handle processes source events and returns commands and facts for other aggregates.
-// Sagas are stateless translators - they receive source events only.
-func (s *SagaBase) Handle(source *pb.EventBook) (*SagaHandlerResponse, error) {
+// Sagas are stateless translators - they receive source events and destination sequences.
+func (s *SagaBase) Handle(source *pb.EventBook, destinations *Destinations) (*SagaHandlerResponse, error) {
 	if source == nil || len(source.Pages) == 0 {
 		return &SagaHandlerResponse{}, nil
 	}

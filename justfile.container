@@ -17,17 +17,14 @@ proto:
 build: proto
     go build -ldflags '{{LDFLAGS}}' ./...
 
-test:
+test: proto
     go test -v ./...
 
-coverage:
+coverage: proto
     go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out
 
-mutate:
-    go install github.com/go-gremlins/gremlins/cmd/gremlins@latest && gremlins unleash --timeout-coefficient 10 --exclude-files="proto/" .
-
-mutate-dry:
-    go install github.com/go-gremlins/gremlins/cmd/gremlins@latest && gremlins unleash --dry-run --exclude-files="proto/" .
+mutation-test: proto
+    go test -v -tags=mutation -run TestMutation -count=1 -timeout 30m ./...
 
 # Format check (gofmt)
 fmt:

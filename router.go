@@ -662,8 +662,8 @@ func (r *CommandHandlerRouter[S]) Dispatch(cmd *pb.ContextualCommand) (*pb.Busin
 
 	typeURL := commandAny.TypeUrl
 
-	// Check for Notification (rejection/compensation)
-	if strings.HasSuffix(typeURL, "Notification") {
+	// Check for Notification (rejection/compensation) — exact match
+	if typeURL == TypeURLPrefix+"angzarr.Notification" {
 		return r.dispatchCHNotification(commandAny, state)
 	}
 
@@ -794,8 +794,8 @@ func (r *SagaRouter) Dispatch(source *pb.EventBook, destinationSequences map[str
 		return nil, status.Error(codes.InvalidArgument, "missing event payload")
 	}
 
-	// Check for Notification (rejection/compensation)
-	if strings.HasSuffix(eventAny.TypeUrl, "Notification") {
+	// Check for Notification (rejection/compensation) — exact match
+	if eventAny.TypeUrl == TypeURLPrefix+"angzarr.Notification" {
 		return r.dispatchSagaNotification(eventAny)
 	}
 
@@ -935,8 +935,8 @@ func (r *ProcessManagerRouter[S]) Dispatch(
 
 	state := r.rebuild(processState)
 
-	// Check for Notification
-	if strings.HasSuffix(eventAny.TypeUrl, "Notification") {
+	// Check for Notification — exact match
+	if eventAny.TypeUrl == TypeURLPrefix+"angzarr.Notification" {
 		return r.dispatchPMNotification(handler, eventAny, state)
 	}
 

@@ -4,28 +4,14 @@ import (
 	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr"
 )
 
-// SagaContext provides access to destination sequences for sagas.
+// Deprecated: SagaContext is deprecated. Use Destinations directly instead.
+// SagaContext wraps Destinations and will be removed in a future release.
 //
-// Used when one event triggers commands to multiple aggregates.
-// Provides sequence number lookup and command stamping for optimistic concurrency.
-//
-// Design Philosophy:
-// - Sagas are translators, NOT decision makers
-// - They should NOT rebuild destination state to make business decisions
-// - Business logic belongs in aggregates
-// - SagaContext provides only sequences for command stamping
-//
-// Example usage:
-//
-//	func HandleTableSettled(evt *examples.TableSettled, ctx *SagaContext) []*pb.CommandBook {
-//	    commands := make([]*pb.CommandBook, 0, len(evt.Payouts))
-//	    for _, payout := range evt.Payouts {
-//	        cmd := NewCommandBook("player", &examples.TransferFunds{...})
-//	        ctx.StampCommand(cmd, "player")
-//	        commands = append(commands, cmd)
-//	    }
-//	    return commands
-//	}
+// Migration: Replace SagaContext with *Destinations in handler signatures.
+// All SagaContext methods delegate to Destinations equivalents:
+//   - GetSequence → SequenceFor
+//   - StampCommand → StampCommand
+//   - HasDestination → Has
 type SagaContext struct {
 	destinations *Destinations
 }

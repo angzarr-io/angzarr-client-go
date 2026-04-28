@@ -59,11 +59,8 @@ coverage-html:
     just _container coverage
     go tool cover -html="{{ROOT}}/coverage.out"
 
-mutate:
-    just _container mutate
-
-mutate-dry:
-    just _container mutate-dry
+mutation-test:
+    just _container mutation-test
 
 clean:
     rm -f "{{ROOT}}/coverage.out"

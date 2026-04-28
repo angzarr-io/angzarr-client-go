@@ -280,12 +280,22 @@ func (c *DomainClient) CommandNew(domain string) *CommandBuilder {
 	return c.CommandHandler.CommandNew(domain)
 }
 
-// NewQuery starts building a query via the domain client's query client.
-func (c *DomainClient) NewQuery(domain string, root uuid.UUID) *QueryBuilder {
+// QueryEvents starts building a query for a specific aggregate via the domain client's query client.
+func (c *DomainClient) QueryEvents(domain string, root uuid.UUID) *QueryBuilder {
 	return c.Query.Query(domain, root)
 }
 
-// NewQueryDomain starts building a query by domain only.
-func (c *DomainClient) NewQueryDomain(domain string) *QueryBuilder {
+// QueryDomain starts building a query by domain only (use with ByCorrelationID).
+func (c *DomainClient) QueryDomain(domain string) *QueryBuilder {
 	return c.Query.QueryDomain(domain)
+}
+
+// Deprecated: NewQuery is deprecated. Use QueryEvents instead.
+func (c *DomainClient) NewQuery(domain string, root uuid.UUID) *QueryBuilder {
+	return c.QueryEvents(domain, root)
+}
+
+// Deprecated: NewQueryDomain is deprecated. Use QueryDomain instead.
+func (c *DomainClient) NewQueryDomain(domain string) *QueryBuilder {
+	return c.QueryDomain(domain)
 }
