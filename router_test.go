@@ -328,10 +328,6 @@ func NewMockPMHandler(types ...string) *MockPMHandler {
 	return &MockPMHandler{eventTypes: types}
 }
 
-func (h *MockPMHandler) Prepare(trigger *pb.EventBook, state *TestState, event *anypb.Any) []*pb.Cover {
-	return []*pb.Cover{}
-}
-
 func (h *MockPMHandler) EventTypes() []string {
 	return h.eventTypes
 }
@@ -595,22 +591,6 @@ func TestSagaRouterDispatch(t *testing.T) {
 // ProcessManagerRouter Tests
 // ============================================================================
 
-func TestProcessManagerDomainHandlerHasPrepare(t *testing.T) {
-	handler := NewMockPMHandler("test.OrderCreated")
-	trigger := &pb.EventBook{
-		Cover: &pb.Cover{Domain: "orders"},
-		Pages: []*pb.EventPage{
-			{Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: "test.OrderCreated"}}},
-		},
-	}
-	event := trigger.Pages[0].GetEvent()
-	state := &TestState{}
-
-	covers := handler.Prepare(trigger, state, event)
-	if covers == nil {
-		t.Fatal("Prepare() should return non-nil slice")
-	}
-}
 func TestProcessManagerRouterCreation(t *testing.T) {
 	rebuild := func(events *pb.EventBook) *TestState {
 		return &TestState{Value: "pm-state"}
