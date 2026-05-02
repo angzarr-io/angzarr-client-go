@@ -886,7 +886,7 @@ func TestCommandHandlerRouterDispatchNotification(t *testing.T) {
 	notification := &pb.Notification{}
 	notificationBytes, _ := proto.Marshal(notification)
 	notificationAny := &anypb.Any{
-		TypeUrl: "type.googleapis.com/angzarr.Notification",
+		TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.Notification",
 		Value:   notificationBytes,
 	}
 
@@ -932,7 +932,7 @@ func TestCommandHandlerRouterDispatchNotificationReturnsRevocation(t *testing.T)
 	notification := &pb.Notification{}
 	notificationBytes, _ := proto.Marshal(notification)
 	notificationAny := &anypb.Any{
-		TypeUrl: "type.googleapis.com/angzarr.Notification",
+		TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.Notification",
 		Value:   notificationBytes,
 	}
 
@@ -1015,7 +1015,7 @@ func TestProcessManagerRouterDispatchNotification(t *testing.T) {
 	notification := &pb.Notification{}
 	notificationBytes, _ := proto.Marshal(notification)
 	notificationAny := &anypb.Any{
-		TypeUrl: "type.googleapis.com/angzarr.Notification",
+		TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.Notification",
 		Value:   notificationBytes,
 	}
 

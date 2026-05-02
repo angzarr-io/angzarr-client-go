@@ -343,7 +343,7 @@ func (c *CompensationContext) whenBuildNotification() error {
 	}{
 		Cover:       struct{}{},
 		SentAt:      timestamppb.Now(),
-		PayloadType: "type.googleapis.com/angzarr.RejectionNotification",
+		PayloadType: "type.googleapis.com/angzarr_client.proto.angzarr.RejectionNotification",
 	}
 	return nil
 }
