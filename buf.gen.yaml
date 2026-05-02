@@ -2,9 +2,16 @@ version: v2
 inputs:
   - directory: angzarr-project/proto
 plugins:
+  # `module=` strips the prefix from each file's go_package and writes
+  # output relative to that. With go_package set to e.g.
+  # `github.com/angzarr/angzarr/proto/angzarr`, output lands at
+  # `proto/angzarr/*.pb.go` — matching what client source code imports
+  # via `github.com/benjaminabbitt/angzarr/client/go/proto/angzarr`.
+  # Decouples the in-tree layout from where angzarr-project keeps the
+  # .proto files (now `proto/angzarr_client/proto/angzarr/*.proto`).
   - remote: buf.build/protocolbuffers/go
     out: proto
-    opt: paths=source_relative
+    opt: module=github.com/angzarr/angzarr/proto
   - remote: buf.build/grpc/go
     out: proto
-    opt: paths=source_relative
+    opt: module=github.com/angzarr/angzarr/proto
