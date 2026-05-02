@@ -31,7 +31,7 @@ import (
 )
 
 // NotificationTypeName is the fully-qualified proto type name for Notification.
-const NotificationTypeName = "angzarr.Notification"
+const NotificationTypeName = "angzarr_client.proto.angzarr.Notification"
 
 // CompensationContext provides easy access to rejection details.
 type CompensationContext struct {

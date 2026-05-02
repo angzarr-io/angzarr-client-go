@@ -335,7 +335,7 @@ func TestCommandHandlerBase_DispatchRejection_EdgeCases(t *testing.T) {
 		notification := &pb.Notification{Payload: nil}
 		notificationBytes, _ := proto.Marshal(notification)
 		notificationAny := &anypb.Any{
-			TypeUrl: TypeURLPrefix + "angzarr.Notification",
+			TypeUrl: TypeURLPrefix + "angzarr_client.proto.angzarr.Notification",
 			Value:   notificationBytes,
 		}
 

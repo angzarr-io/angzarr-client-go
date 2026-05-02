@@ -540,7 +540,7 @@ func (a *CommandHandlerBase[S]) Handle(request *pb.ContextualCommand) (*pb.Busin
 	}
 
 	// Check for Notification (rejection/compensation)
-	if cmdAny.TypeUrl == TypeURLPrefix+"angzarr.Notification" {
+	if cmdAny.TypeUrl == TypeURLPrefix+"angzarr_client.proto.angzarr.Notification" {
 		return a.dispatchRejection(cmdAny)
 	}
 
