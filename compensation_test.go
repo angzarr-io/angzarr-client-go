@@ -45,7 +45,7 @@ func TestRejectionHandlerResponse_EventsOnly(t *testing.T) {
 
 func TestRejectionHandlerResponse_NotificationOnly(t *testing.T) {
 	notification := &pb.Notification{
-		Payload: &anypb.Any{TypeUrl: "type.googleapis.com/angzarr.RejectionNotification"},
+		Payload: &anypb.Any{TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.RejectionNotification"},
 	}
 
 	response := &RejectionHandlerResponse{Notification: notification}
@@ -65,7 +65,7 @@ func TestRejectionHandlerResponse_BothEventsAndNotification(t *testing.T) {
 		},
 	}
 	notification := &pb.Notification{
-		Payload: &anypb.Any{TypeUrl: "type.googleapis.com/angzarr.RejectionNotification"},
+		Payload: &anypb.Any{TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.RejectionNotification"},
 	}
 
 	response := &RejectionHandlerResponse{
@@ -111,7 +111,7 @@ func TestRejectionHandlerResponse_NotificationPayloadAccessible(t *testing.T) {
 
 	notification := &pb.Notification{
 		Payload: &anypb.Any{
-			TypeUrl: "type.googleapis.com/angzarr.RejectionNotification",
+			TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.RejectionNotification",
 			Value:   rejectionBytes,
 		},
 	}
@@ -136,7 +136,7 @@ func TestIsNotification(t *testing.T) {
 		typeURL  string
 		expected bool
 	}{
-		{"type.googleapis.com/angzarr.Notification", true},
+		{"type.googleapis.com/angzarr_client.proto.angzarr.Notification", true},
 		{"type.googleapis.com/test.SomeNotification", false}, // Different type, not the real Notification
 		{"type.googleapis.com/test.SomeCommand", false},
 		{"type.googleapis.com/test.SomeEvent", false},
@@ -177,7 +177,7 @@ func TestCompensationContext(t *testing.T) {
 
 	notification := &pb.Notification{
 		Payload: &anypb.Any{
-			TypeUrl: "type.googleapis.com/angzarr.RejectionNotification",
+			TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.RejectionNotification",
 			Value:   rejectionBytes,
 		},
 	}
