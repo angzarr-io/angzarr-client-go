@@ -19,7 +19,9 @@ jobs:
           submodules: true
 
       - name: Configure git safe directory
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        # Wildcard covers nested submodule paths; the workspace-only form
+        # leaves submodule git ops vulnerable to dubious-ownership.
+        run: git config --global --add safe.directory '*'
 
       - name: Build
         run: just build
