@@ -343,12 +343,6 @@ func NewTraitProcessManagerHandler[S any](router *ProcessManagerRouter[S]) *Trai
 	return &TraitProcessManagerHandler[S]{router: router}
 }
 
-// Prepare declares which additional destinations are needed.
-// Destinations are now config-driven, no dynamic declaration needed.
-func (h *TraitProcessManagerHandler[S]) Prepare(ctx context.Context, req *pb.ProcessManagerPrepareRequest) (*pb.ProcessManagerPrepareResponse, error) {
-	return &pb.ProcessManagerPrepareResponse{}, nil
-}
-
 // Handle processes events and returns commands and process events.
 func (h *TraitProcessManagerHandler[S]) Handle(ctx context.Context, req *pb.ProcessManagerHandleRequest) (*pb.ProcessManagerHandleResponse, error) {
 	resp, err := h.router.Dispatch(req.Trigger, req.ProcessState, req.GetDestinationSequences())
@@ -477,10 +471,6 @@ func RunProjectorServer(name, defaultPort string, handler *ProjectorHandler) {
 	})
 }
 
-// PMPrepareFunc declares additional destinations needed beyond the trigger.
-// NOTE: Destinations are now config-driven, this is for backward compatibility.
-type PMPrepareFunc func(trigger, processState *pb.EventBook) []*pb.Cover
-
 // PMHandleFunc processes events and returns commands and process events.
 // Destination sequences are provided for command stamping (config-driven).
 type PMHandleFunc func(trigger, processState *pb.EventBook, destinationSequences map[string]uint32) ([]*pb.CommandBook, *pb.EventBook, error)
@@ -503,7 +493,6 @@ type PMRevocationFunc func(notification *pb.Notification, processState *pb.Event
 type ProcessManagerHandler struct {
 	pb.UnimplementedProcessManagerServiceServer
 	name         string
-	prepareFn    PMPrepareFunc
 	handleFn     PMHandleFunc
 	revocationFn PMRevocationFunc
 }
@@ -513,12 +502,6 @@ func NewProcessManagerHandler(name string) *ProcessManagerHandler {
 	return &ProcessManagerHandler{
 		name: name,
 	}
-}
-
-// WithPrepare sets the prepare callback.
-func (h *ProcessManagerHandler) WithPrepare(fn PMPrepareFunc) *ProcessManagerHandler {
-	h.prepareFn = fn
-	return h
 }
 
 // WithHandle sets the handle callback.
@@ -541,15 +524,6 @@ func (h *ProcessManagerHandler) WithRevocationHandler(fn PMRevocationFunc) *Proc
 	return h
 }
 
-// Prepare declares which additional destinations are needed.
-func (h *ProcessManagerHandler) Prepare(ctx context.Context, req *pb.ProcessManagerPrepareRequest) (*pb.ProcessManagerPrepareResponse, error) {
-	if h.prepareFn != nil {
-		destinations := h.prepareFn(req.Trigger, req.ProcessState)
-		return &pb.ProcessManagerPrepareResponse{Destinations: destinations}, nil
-	}
-	return &pb.ProcessManagerPrepareResponse{}, nil
-}
-
 // Handle processes events and returns commands and process events.
 func (h *ProcessManagerHandler) Handle(ctx context.Context, req *pb.ProcessManagerHandleRequest) (*pb.ProcessManagerHandleResponse, error) {
 	if h.handleFn != nil {
@@ -557,9 +531,17 @@ func (h *ProcessManagerHandler) Handle(ctx context.Context, req *pb.ProcessManag
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
+		// Audit #92: ProcessEvents is `repeated EventBook` (matching
+		// Python's list and Rust's Vec). Wrap the single book the
+		// PMHandleFunc currently returns; broader migration of
+		// PMHandleFunc to a slice is a follow-up.
+		var processEventsList []*pb.EventBook
+		if processEvents != nil {
+			processEventsList = []*pb.EventBook{processEvents}
+		}
 		return &pb.ProcessManagerHandleResponse{
 			Commands:      commands,
-			ProcessEvents: processEvents,
+			ProcessEvents: processEventsList,
 		}, nil
 	}
 	return &pb.ProcessManagerHandleResponse{}, nil
@@ -763,12 +745,6 @@ func NewOOProcessManagerHandler(pm OOProcessManager) *OOProcessManagerHandler {
 	return &OOProcessManagerHandler{pm: pm}
 }
 
-// Prepare declares which additional destinations are needed.
-func (h *OOProcessManagerHandler) Prepare(ctx context.Context, req *pb.ProcessManagerPrepareRequest) (*pb.ProcessManagerPrepareResponse, error) {
-	// Destinations are now config-driven, no dynamic declaration needed
-	return &pb.ProcessManagerPrepareResponse{}, nil
-}
-
 // Handle processes events and returns commands and process events.
 func (h *OOProcessManagerHandler) Handle(ctx context.Context, req *pb.ProcessManagerHandleRequest) (*pb.ProcessManagerHandleResponse, error) {
 	destinations := NewDestinations(req.GetDestinationSequences())
@@ -780,9 +756,15 @@ func (h *OOProcessManagerHandler) Handle(ctx context.Context, req *pb.ProcessMan
 		}
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	// Audit #92: ProcessEvents is `repeated EventBook` — wrap the single
+	// book OOProcessManager.Handle returns.
+	var processEventsList []*pb.EventBook
+	if processEvents != nil {
+		processEventsList = []*pb.EventBook{processEvents}
+	}
 	return &pb.ProcessManagerHandleResponse{
 		Commands:      commands,
-		ProcessEvents: processEvents,
+		ProcessEvents: processEventsList,
 	}, nil
 }
 
