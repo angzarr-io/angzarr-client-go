@@ -952,9 +952,16 @@ func (r *ProcessManagerRouter[S]) Dispatch(
 		response = &ProcessManagerResponse{}
 	}
 
+	// Audit #92: ProcessEvents is `repeated EventBook` — wrap the
+	// single book the user-facing ProcessManagerResponse currently
+	// carries.
+	var processEventsList []*pb.EventBook
+	if response.ProcessEvents != nil {
+		processEventsList = []*pb.EventBook{response.ProcessEvents}
+	}
 	return &pb.ProcessManagerHandleResponse{
 		Commands:      response.Commands,
-		ProcessEvents: response.ProcessEvents,
+		ProcessEvents: processEventsList,
 	}, nil
 }
 
@@ -983,14 +990,14 @@ func (r *ProcessManagerRouter[S]) dispatchPMNotification(
 		return nil, err
 	}
 
-	var events *pb.EventBook
-	if response != nil {
-		events = response.Events
+	// Audit #92: ProcessEvents is `repeated EventBook`.
+	var processEventsList []*pb.EventBook
+	if response != nil && response.Events != nil {
+		processEventsList = []*pb.EventBook{response.Events}
 	}
-
 	return &pb.ProcessManagerHandleResponse{
 		Commands:      nil,
-		ProcessEvents: events,
+		ProcessEvents: processEventsList,
 	}, nil
 }
 
