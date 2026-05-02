@@ -142,7 +142,7 @@ func TestIsNotification(t *testing.T) {
 		{"type.googleapis.com/test.SomeEvent", false},
 		{"Notification", false},         // Incomplete type URL
 		{"NotificationEvent", false},    // Different type
-		{"angzarr.Notification", false}, // Missing prefix
+		{"angzarr_client.proto.angzarr.Notification", false}, // Missing prefix
 	}
 
 	for _, tc := range tests {
