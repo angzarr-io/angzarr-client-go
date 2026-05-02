@@ -203,7 +203,9 @@ func (c *QueryClientContext) iQueryEventsForRootFromSequenceTo(domain, root stri
 			NextSequence: book.NextSequence,
 		}
 		for _, page := range book.Pages {
-			if page.GetHeader().GetSequence() >= uint32(from) && page.GetHeader().GetSequence() < uint32(to) {
+			// Audit finding #27: range_to upper bound is INCLUSIVE
+			// (matches Python's builder.py:155 and Rust's builder.rs:170).
+			if page.GetHeader().GetSequence() >= uint32(from) && page.GetHeader().GetSequence() <= uint32(to) {
 				result.Pages = append(result.Pages, page)
 			}
 		}
