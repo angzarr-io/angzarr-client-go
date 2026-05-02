@@ -1,14 +1,20 @@
 version: v2
 inputs:
   - directory: angzarr-project/proto
+    # Exclude google/api/* — they ship as `google.golang.org/genproto`
+    # and have a `go_package` outside our `module=` prefix, which would
+    # otherwise make protoc-gen-go fail with "generated file does not
+    # match prefix".
+    exclude_paths:
+      - angzarr-project/proto/google
 plugins:
-  # `module=` strips the prefix from each file's go_package and writes
-  # output relative to that. With go_package set to e.g.
-  # `github.com/angzarr/angzarr/proto/angzarr`, output lands at
-  # `proto/angzarr/*.pb.go` — matching what client source code imports
-  # via `github.com/benjaminabbitt/angzarr/client/go/proto/angzarr`.
-  # Decouples the in-tree layout from where angzarr-project keeps the
-  # .proto files (now `proto/angzarr_client/proto/angzarr/*.proto`).
+  # `module=` writes each generated file at the path computed by
+  # stripping this prefix from the .proto's `go_package`. With
+  # go_package = "github.com/angzarr/angzarr/proto/angzarr", output
+  # lands at `proto/angzarr/*.pb.go` — matching the existing
+  # `github.com/benjaminabbitt/angzarr/client/go/proto/angzarr`
+  # imports. Decouples the in-tree layout from where angzarr-project
+  # keeps the .proto files (now `proto/angzarr_client/proto/angzarr/`).
   - remote: buf.build/protocolbuffers/go
     out: proto
     opt: module=github.com/angzarr/angzarr/proto
