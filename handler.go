@@ -531,9 +531,17 @@ func (h *ProcessManagerHandler) Handle(ctx context.Context, req *pb.ProcessManag
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
+		// Audit #92: ProcessEvents is `repeated EventBook` (matching
+		// Python's list and Rust's Vec). Wrap the single book the
+		// PMHandleFunc currently returns; broader migration of
+		// PMHandleFunc to a slice is a follow-up.
+		var processEventsList []*pb.EventBook
+		if processEvents != nil {
+			processEventsList = []*pb.EventBook{processEvents}
+		}
 		return &pb.ProcessManagerHandleResponse{
 			Commands:      commands,
-			ProcessEvents: processEvents,
+			ProcessEvents: processEventsList,
 		}, nil
 	}
 	return &pb.ProcessManagerHandleResponse{}, nil
@@ -748,9 +756,15 @@ func (h *OOProcessManagerHandler) Handle(ctx context.Context, req *pb.ProcessMan
 		}
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	// Audit #92: ProcessEvents is `repeated EventBook` — wrap the single
+	// book OOProcessManager.Handle returns.
+	var processEventsList []*pb.EventBook
+	if processEvents != nil {
+		processEventsList = []*pb.EventBook{processEvents}
+	}
 	return &pb.ProcessManagerHandleResponse{
 		Commands:      commands,
-		ProcessEvents: processEvents,
+		ProcessEvents: processEventsList,
 	}, nil
 }
 
