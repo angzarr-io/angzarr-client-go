@@ -153,7 +153,7 @@ func (r *CommandRouter[S]) Dispatch(cmd *pb.ContextualCommand) (*pb.BusinessResp
 	typeURL := commandAny.TypeUrl
 
 	// Check for Notification (rejection/compensation)
-	if typeURL == TypeURLPrefix+"angzarr.Notification" {
+	if typeURL == TypeURLPrefix+"angzarr_client.proto.angzarr.Notification" {
 		notification := &pb.Notification{}
 		if err := commandAny.UnmarshalTo(notification); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal Notification: %w", err)
