@@ -663,7 +663,7 @@ func (r *CommandHandlerRouter[S]) Dispatch(cmd *pb.ContextualCommand) (*pb.Busin
 	typeURL := commandAny.TypeUrl
 
 	// Check for Notification (rejection/compensation) — exact match
-	if typeURL == TypeURLPrefix+"angzarr.Notification" {
+	if strings.HasSuffix(typeURL, "Notification") {
 		return r.dispatchCHNotification(commandAny, state)
 	}
 
@@ -795,7 +795,7 @@ func (r *SagaRouter) Dispatch(source *pb.EventBook, destinationSequences map[str
 	}
 
 	// Check for Notification (rejection/compensation) — exact match
-	if eventAny.TypeUrl == TypeURLPrefix+"angzarr.Notification" {
+	if strings.HasSuffix(eventAny.TypeUrl, "Notification") {
 		return r.dispatchSagaNotification(eventAny)
 	}
 
@@ -936,7 +936,7 @@ func (r *ProcessManagerRouter[S]) Dispatch(
 	state := r.rebuild(processState)
 
 	// Check for Notification — exact match
-	if eventAny.TypeUrl == TypeURLPrefix+"angzarr.Notification" {
+	if strings.HasSuffix(eventAny.TypeUrl, "Notification") {
 		return r.dispatchPMNotification(handler, eventAny, state)
 	}
 
