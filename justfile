@@ -27,7 +27,7 @@ _container +ARGS:
     if [ "${DEVCONTAINER:-}" = "true" ]; then
         just {{ARGS}}
     else
-        podman run --rm --network=host \
+        docker run --rm --network=host \
             -v "{{ROOT}}:/workspace:Z" \
             -v "{{ROOT}}/justfile.container:/workspace/justfile:ro" \
             -w /workspace \
