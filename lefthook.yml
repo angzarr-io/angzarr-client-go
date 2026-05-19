@@ -4,9 +4,21 @@
 # Setup: lefthook install
 # Bypass: git commit --no-verify (or LEFTHOOK=0 git commit)
 
+post-checkout:
+  commands:
+    install-submodule-hooks:
+      run: just install-submodule-hooks
+
+post-merge:
+  commands:
+    install-submodule-hooks:
+      run: just install-submodule-hooks
+
 pre-commit:
   parallel: false
   commands:
+    check-submodules-clean:
+      run: just check-submodules-clean
     fmt:
       run: just fmt-fix
       stage_fixed: true

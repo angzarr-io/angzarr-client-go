@@ -17,6 +17,10 @@
 
 set shell := ["bash", "-c"]
 
+# Reusable submodule-protection recipes (install-submodule-hooks,
+# check-submodules-clean). Source of truth: angzarr-project/submodule.just.
+import? 'angzarr-project/submodule.just'
+
 ROOT := `git rev-parse --show-toplevel`
 IMAGE := "ghcr.io/angzarr-io/angzarr-go:latest"
 
