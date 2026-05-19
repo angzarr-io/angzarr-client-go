@@ -22,13 +22,17 @@ func TestErrorKindConstants(t *testing.T) {
 }
 
 func TestClientError_Error_WithCause(t *testing.T) {
+	// MED-1.10 (cross-language-spec.md §1.8): the audit-#59 static-message
+	// contract requires Error() to return Message only — the dynamic cause
+	// string MUST NOT leak into Error(). Callers can still reach the cause
+	// via errors.Unwrap / errors.As.
 	cause := errors.New("underlying error")
 	err := &ClientError{Kind: ErrTransport, Message: "transport failed", Cause: cause}
 
 	got := err.Error()
-	want := "transport failed: underlying error"
+	want := "transport failed"
 	if got != want {
-		t.Errorf("got %q, want %q", got, want)
+		t.Errorf("got %q, want %q (MED-1.10: cause must not leak into Error())", got, want)
 	}
 }
 
@@ -63,32 +67,32 @@ func TestClientError_Code_GRPCError(t *testing.T) {
 	grpcErr := status.Error(codes.NotFound, "not found")
 	err := &ClientError{Kind: ErrGRPC, Message: "grpc error", Cause: grpcErr}
 
-	if err.Code() != codes.NotFound {
-		t.Errorf("got %v, want %v", err.Code(), codes.NotFound)
+	if err.GRPCCode() != codes.NotFound {
+		t.Errorf("got %v, want %v", err.GRPCCode(), codes.NotFound)
 	}
 }
 
 func TestClientError_Code_NonGRPCKind(t *testing.T) {
 	err := &ClientError{Kind: ErrConnection, Message: "connection error"}
 
-	if err.Code() != codes.Unknown {
-		t.Errorf("got %v, want %v", err.Code(), codes.Unknown)
+	if err.GRPCCode() != codes.Unknown {
+		t.Errorf("got %v, want %v", err.GRPCCode(), codes.Unknown)
 	}
 }
 
 func TestClientError_Code_NilCause(t *testing.T) {
 	err := &ClientError{Kind: ErrGRPC, Message: "grpc error", Cause: nil}
 
-	if err.Code() != codes.Unknown {
-		t.Errorf("got %v, want %v", err.Code(), codes.Unknown)
+	if err.GRPCCode() != codes.Unknown {
+		t.Errorf("got %v, want %v", err.GRPCCode(), codes.Unknown)
 	}
 }
 
 func TestClientError_Code_NonStatusCause(t *testing.T) {
 	err := &ClientError{Kind: ErrGRPC, Message: "grpc error", Cause: errors.New("not a status")}
 
-	if err.Code() != codes.Unknown {
-		t.Errorf("got %v, want %v", err.Code(), codes.Unknown)
+	if err.GRPCCode() != codes.Unknown {
+		t.Errorf("got %v, want %v", err.GRPCCode(), codes.Unknown)
 	}
 }
 

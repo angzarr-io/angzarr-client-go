@@ -3,7 +3,7 @@ package angzarr
 import (
 	"context"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -32,11 +32,18 @@ func NewCommandBuilder(client *CommandHandlerClient, domain string, root uuid.UU
 	}
 }
 
-// NewCommandBuilderNew creates a command builder for a new aggregate (no root yet).
+// NewCommandBuilderNew creates a command builder for a new aggregate.
+//
+// Audit finding #20 (P2.4a): a fresh UUID v4 is materialized client-side and
+// stamped as the aggregate root. Aggregate roots are always client-assigned
+// across all six languages — there is no path to skip the root. Mirrors
+// Python `client.command_new(domain)` and Rust `CommandBuilderExt::command_new`.
 func NewCommandBuilderNew(client *CommandHandlerClient, domain string) *CommandBuilder {
+	root := uuid.New()
 	return &CommandBuilder{
 		client: client,
 		domain: domain,
+		root:   &root,
 	}
 }
 
@@ -72,18 +79,34 @@ func (b *CommandBuilder) WithCommand(typeURL string, msg proto.Message) *Command
 }
 
 // Build constructs the CommandBook without executing.
+//
+// HIGH-3.2: validation errors carry the cross-language SCREAMING_SNAKE
+// `Code` field so cucumber/parity assertions can match on stable
+// identifiers (e.g. CodeCommandTypeURLMissing).
 func (b *CommandBuilder) Build() (*pb.CommandBook, error) {
 	if b.err != nil {
 		return nil, b.err
 	}
 	if b.typeURL == "" {
-		return nil, InvalidArgumentError("command type_url not set")
+		return nil, InvalidArgumentErrorWithCode(
+			CodeCommandTypeURLMissing,
+			MessageCommandTypeURLMissing,
+			map[string]string{ExtraKeyField: "type_url", ExtraKeyDomain: b.domain},
+		)
 	}
 	if b.payload == nil {
-		return nil, InvalidArgumentError("command payload not set")
+		return nil, InvalidArgumentErrorWithCode(
+			CodeCommandPayloadMissing,
+			MessageCommandPayloadMissing,
+			map[string]string{ExtraKeyField: "payload", ExtraKeyDomain: b.domain},
+		)
 	}
 	if !b.sequenceSet {
-		return nil, InvalidArgumentError("sequence not set (call WithSequence)")
+		return nil, InvalidArgumentErrorWithCode(
+			CodeCommandSequenceMissing,
+			MessageCommandSequenceMissing,
+			map[string]string{ExtraKeyField: "sequence", ExtraKeyDomain: b.domain},
+		)
 	}
 
 	correlationID := b.correlationID
@@ -161,36 +184,65 @@ func (b *QueryBuilder) WithEdition(edition string) *QueryBuilder {
 }
 
 // Range queries a range of sequences from lower (inclusive).
+//
+// Last-selection-wins: clears any previously-set temporal selection so
+// chained calls like `.AsOfSequence(10).Range(5)` produce a Query with
+// only the range. Mirrors Rust's single-slot `Option<Selection>` semantics
+// and Python audit finding #23.
 func (b *QueryBuilder) Range(lower uint32) *QueryBuilder {
 	b.rangeSelect = &pb.SequenceRange{Lower: lower}
+	b.temporal = nil
 	return b
 }
 
 // RangeTo queries a range of sequences with upper bound (inclusive).
+//
+// Last-selection-wins: clears any previously-set temporal selection.
 func (b *QueryBuilder) RangeTo(lower, upper uint32) *QueryBuilder {
 	b.rangeSelect = &pb.SequenceRange{Lower: lower, Upper: &upper}
+	b.temporal = nil
 	return b
 }
 
 // AsOfSequence queries state as of a specific sequence number.
+//
+// Last-selection-wins: clears any previously-set range selection.
 func (b *QueryBuilder) AsOfSequence(seq uint32) *QueryBuilder {
 	b.temporal = &pb.TemporalQuery{
 		PointInTime: &pb.TemporalQuery_AsOfSequence{AsOfSequence: seq},
 	}
+	b.rangeSelect = nil
 	return b
 }
 
 // AsOfTime queries state as of a specific timestamp (RFC3339 format).
-func (b *QueryBuilder) AsOfTime(rfc3339 string) *QueryBuilder {
+//
+// Audit #34 / spec MED-3.5: bad input short-circuits here at the call site
+// rather than deferring to Build(). Returning (b, err) prevents a stale
+// error surviving subsequent setters (e.g.
+// `b.AsOfTime("bad")...AsOfSequence(5).Build()` would surface the dead
+// error under the deferred shape). Mirrors Py `QueryBuilder.as_of_time`
+// (raises immediately) and Rs `QueryBuilder::as_of_time` (returns
+// Result<Self>).
+func (b *QueryBuilder) AsOfTime(rfc3339 string) (*QueryBuilder, error) {
 	ts, err := ParseTimestamp(rfc3339)
 	if err != nil {
-		b.err = err
-		return b
+		return b, err
 	}
 	b.temporal = &pb.TemporalQuery{
 		PointInTime: &pb.TemporalQuery_AsOfTime{AsOfTime: ts},
 	}
-	return b
+	// Audit #34: last-selection-wins — drop any prior range selection.
+	b.rangeSelect = nil
+	return b, nil
+}
+
+// AsOfTimeE is a deprecated alias for AsOfTime.
+//
+// Deprecated: AsOfTime now returns the error at the call site (per MED-3.5);
+// AsOfTimeE retained for backward compatibility.
+func (b *QueryBuilder) AsOfTimeE(rfc3339 string) (*QueryBuilder, error) {
+	return b.AsOfTime(rfc3339)
 }
 
 // Build constructs the Query without executing.

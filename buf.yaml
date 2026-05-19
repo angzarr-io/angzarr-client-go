@@ -1,0 +1,11 @@
+version: v2
+# Single module: angzarr-project provides sererr at proto/sererr/v1/sererr.proto
+# since PR #11 (no longer needs per-repo proto-deps vendoring).
+modules:
+  - path: angzarr-project/proto
+lint:
+  use:
+    - MINIMAL
+breaking:
+  use:
+    - FILE

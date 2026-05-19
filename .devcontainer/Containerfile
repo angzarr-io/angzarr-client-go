@@ -4,5 +4,13 @@
 ARG GO_IMAGE=ghcr.io/angzarr-io/angzarr-go:latest
 FROM ${GO_IMAGE}
 
+# INFRA-1: see Rust devcontainer comment. Applies system-wide so the
+# `_container` entry's `git rev-parse --show-toplevel` succeeds against
+# the bind-mounted /workspace under rootless docker.
+USER root
+RUN git config --system --add safe.directory '*' \
+ && git config --system --add safe.directory '/workspace' \
+ && git config --system --add safe.directory '/angzarr'
+
 # Mark as devcontainer for justfile detection
 ENV DEVCONTAINER=true

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -22,9 +22,15 @@ import (
 //
 // Use this for business rule rejections where the aggregate's current state
 // doesn't allow the operation (e.g., "insufficient funds", "player already exists").
+//
+// Code carries a SCREAMING_SNAKE cross-language identifier (e.g.
+// CodeStatusMismatch). Details carries structured context. Mirrors Rust
+// `CommandRejectedError` and Python `CommandRejectedError` per spec §1.3.
 type CommandRejectedError struct {
 	Message    string
-	StatusCode string // "FAILED_PRECONDITION" or "INVALID_ARGUMENT"
+	StatusCode string // "FAILED_PRECONDITION", "INVALID_ARGUMENT", or "NOT_FOUND"
+	Code       string
+	Details    map[string]string
 }
 
 func (e CommandRejectedError) Error() string {
@@ -39,6 +45,61 @@ func NewCommandRejectedError(msg string) error {
 // NewInvalidArgumentError creates an INVALID_ARGUMENT error for input validation failures.
 func NewInvalidArgumentError(msg string) error {
 	return CommandRejectedError{Message: msg, StatusCode: "INVALID_ARGUMENT"}
+}
+
+// NewPreconditionFailedRejection builds a structured FAILED_PRECONDITION
+// rejection carrying a cross-language `code`, a static `message`, and a
+// `details` map. Mirrors Py `CommandRejectedError.precondition_failed`
+// (`errors.py:208`), Rs `CommandRejectedError::precondition_failed`
+// (`error.rs:247`), Ja `Errors.CommandRejectedError.preconditionFailed`,
+// Cs `CommandRejectedError.PreconditionFailed`, Cpp
+// `command_rejected_error::precondition_failed`. Spec MED-1.5.
+func NewPreconditionFailedRejection(code, message string, details map[string]string) CommandRejectedError {
+	return CommandRejectedError{
+		Message:    message,
+		StatusCode: "FAILED_PRECONDITION",
+		Code:       code,
+		Details:    cloneDetails(details),
+	}
+}
+
+// NewInvalidArgumentRejectionWithCode is the (code, message, details)
+// factory mirroring Py `CommandRejectedError.invalid_argument`,
+// Rs `CommandRejectedError::invalid_argument`. Spec MED-1.5.
+func NewInvalidArgumentRejectionWithCode(code, message string, details map[string]string) CommandRejectedError {
+	return CommandRejectedError{
+		Message:    message,
+		StatusCode: "INVALID_ARGUMENT",
+		Code:       code,
+		Details:    cloneDetails(details),
+	}
+}
+
+// NewInvalidArgumentRejection legacy short-form. Kept for backward
+// compatibility with existing example handlers that don't carry a code.
+func NewInvalidArgumentRejection(msg string) error {
+	return CommandRejectedError{Message: msg, StatusCode: "INVALID_ARGUMENT"}
+}
+
+// NewNotFoundRejection mirrors Py `not_found`, Rs `not_found`. Spec MED-1.5.
+func NewNotFoundRejection(code, message string, details map[string]string) CommandRejectedError {
+	return CommandRejectedError{
+		Message:    message,
+		StatusCode: "NOT_FOUND",
+		Code:       code,
+		Details:    cloneDetails(details),
+	}
+}
+
+func cloneDetails(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // StatePacker converts aggregate state to protobuf Any for Replay RPC.

@@ -1,6 +1,4 @@
 version: v2
-inputs:
-  - directory: angzarr-project/proto
 plugins:
   - remote: buf.build/protocolbuffers/go
     out: proto

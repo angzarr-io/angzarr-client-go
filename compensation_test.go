@@ -3,7 +3,7 @@ package angzarr
 import (
 	"testing"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
@@ -140,8 +140,8 @@ func TestIsNotification(t *testing.T) {
 		{"type.googleapis.com/test.SomeNotification", false}, // Different type, not the real Notification
 		{"type.googleapis.com/test.SomeCommand", false},
 		{"type.googleapis.com/test.SomeEvent", false},
-		{"Notification", false},         // Incomplete type URL
-		{"NotificationEvent", false},    // Different type
+		{"Notification", false},                              // Incomplete type URL
+		{"NotificationEvent", false},                         // Different type
 		{"angzarr_client.proto.angzarr.Notification", false}, // Missing prefix
 	}
 

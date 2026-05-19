@@ -4,7 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
 	"github.com/google/uuid"
 )
 

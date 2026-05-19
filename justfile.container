@@ -11,19 +11,53 @@ LDFLAGS := "-X github.com/benjaminabbitt/angzarr/client/go.Version=" + VERSION
 default:
     @just --list
 
-proto:
+# Generate proto code from submodule.
+#
+# Idempotent: skips when bindings are fresher than the newest .proto source.
+# Matches the host-side `just generate-proto` shape so behavior is identical
+# whether invoked from host wrapper or directly inside the devcontainer (CI).
+generate-proto:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    src_dir="{{ROOT}}/angzarr-project/proto"
+    out_dir="{{ROOT}}/proto"
+    if [ ! -d "$src_dir" ]; then
+        echo "[generate-proto] $src_dir missing — submodule not initialized?" >&2
+        exit 1
+    fi
+    # OLDEST_PB vs NEWEST_PROTO — bindings are up-to-date iff the
+    # oldest generated .pb.go is newer than the newest source .proto.
+    # (Matches the other 5 langs. The previous NEWEST_PB inversion was
+    # a workaround for orphan .pb.go leftovers that have since been
+    # wiped.)
+    newest_proto=$(find "$src_dir" -name '*.proto' -printf '%T@\n' 2>/dev/null \
+                    | sort -n | tail -1)
+    oldest_pb=$(find "$out_dir" -name '*.pb.go' -printf '%T@\n' 2>/dev/null \
+                    | sort -n | head -1)
+    if [ -n "$newest_proto" ] && [ -n "$oldest_pb" ] \
+        && awk -v p="$newest_proto" -v b="$oldest_pb" 'BEGIN{exit !(b>p)}'; then
+        echo "[generate-proto] bindings up-to-date, skipping"
+        exit 0
+    fi
+    just generate-proto-force
+
+# Always regenerate, ignoring mtimes.
+generate-proto-force:
     cd {{ROOT}} && buf generate
 
-build: proto
+# Back-compat alias.
+proto: generate-proto
+
+build: generate-proto
     go build -ldflags '{{LDFLAGS}}' ./...
 
-test: proto
+test: generate-proto
     go test -v ./...
 
-coverage: proto
+coverage: generate-proto
     go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out
 
-mutation-test: proto
+mutation-test: generate-proto
     go test -v -tags=mutation -run TestMutation -count=1 -timeout 30m ./...
 
 # Format check (gofmt)

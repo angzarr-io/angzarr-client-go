@@ -4,6 +4,22 @@
 # Setup: lefthook install
 # Bypass: git commit --no-verify (or LEFTHOOK=0 git commit)
 
+# Regenerate proto bindings after every checkout / merge (fresh clone,
+# branch switch, submodule bump). See project_proto_generation_model.md —
+# bindings are gitignored and reproduced on demand. The just recipe is
+# idempotent (mtime guard), so this is a no-op when nothing changed.
+post-checkout:
+  commands:
+    generate-proto:
+      run: just generate-proto
+
+# Same trigger for `git merge` (e.g. pulling tip changes that bumped the
+# angzarr-project submodule). post-checkout alone does not fire on merge.
+post-merge:
+  commands:
+    generate-proto:
+      run: just generate-proto
+
 pre-commit:
   parallel: false
   commands:

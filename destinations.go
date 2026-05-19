@@ -27,7 +27,7 @@ package angzarr
 import (
 	"fmt"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
 )
 
 // Destinations provides access to destination sequences for command stamping.
@@ -62,15 +62,22 @@ func (d *Destinations) SequenceFor(domain string) (uint32, bool) {
 
 // StampCommand stamps all command pages with the sequence for the given domain.
 //
-// Returns an error if the domain is not in the sequences map. This indicates
-// a configuration error -- the domain should be listed in output_domains.
+// Returns a *ClientError with Code == CodeMissingDestinationSequence (audit #64)
+// when the domain is not in the sequences map — check your output_domains config.
+// Mirrors Rust `Destinations::stamp_command` (returns ClientError::invalid_argument
+// with MISSING_DESTINATION_SEQUENCE) and Python (raises InvalidArgumentError with
+// code=MISSING_DESTINATION_SEQUENCE).
 func (d *Destinations) StampCommand(cmd *pb.CommandBook, domain string) error {
 	if d == nil || d.sequences == nil {
 		return fmt.Errorf("destinations is nil")
 	}
 	seq, ok := d.sequences[domain]
 	if !ok {
-		return fmt.Errorf("no sequence for domain '%s' - check output_domains config", domain)
+		return InvalidArgumentErrorWithCode(
+			CodeMissingDestinationSequence,
+			"no sequence available for destination domain - check output_domains config",
+			map[string]string{ExtraKeyDomain: domain},
+		)
 	}
 	for _, page := range cmd.Pages {
 		page.Header = &pb.PageHeader{

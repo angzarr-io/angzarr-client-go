@@ -4,9 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -46,13 +47,51 @@ const (
 //
 // The mode is detected from ANGZARR_MODE env var if not specified.
 // Other env vars: ANGZARR_UDS_BASE, ANGZARR_NAMESPACE, ANGZARR_CH_PORT.
+//
+// Deprecated: prefer ResolveCHEndpointE, which surfaces bad-env-var errors
+// (audit #40) instead of silently falling back to defaults. Retained for
+// backward compatibility; bad input silently uses defaults like before.
 func ResolveCHEndpoint(domain string, mode TransportMode) string {
+	ep, err := ResolveCHEndpointE(domain, mode)
+	if err != nil {
+		// Backward-compat: swallow and fall back. New code should call ResolveCHEndpointE.
+		// Standalone with bad UDS-base never errors; distributed falls back to defaults.
+		if mode == TransportStandalone {
+			base := DefaultUDSBase
+			return fmt.Sprintf("%s/ch-%s.sock", base, domain)
+		}
+		return fmt.Sprintf("ch-%s.%s.svc:%d", domain, DefaultNamespace, DefaultCHPort)
+	}
+	return ep
+}
+
+// ResolveCHEndpointE resolves a domain name to a command handler endpoint,
+// returning an error on bad env-var input.
+//
+// Audit finding #40: an unset env var falls through to its default; a SET
+// but unrecognized value returns an error so operator typos
+// (ANGZARR_MODE=Distrib, ANGZARR_CH_PORT="1310 ") surface at startup
+// instead of silently misrouting. Mirrors Rust's transport.rs and Python's
+// resolve_ch_endpoint behavior.
+func ResolveCHEndpointE(domain string, mode TransportMode) (string, error) {
 	if mode == "" {
 		modeStr := os.Getenv(EnvMode)
 		if modeStr == "" {
 			mode = DefaultTransportMode
 		} else {
-			mode = TransportMode(modeStr)
+			switch TransportMode(modeStr) {
+			case TransportStandalone, TransportDistributed:
+				mode = TransportMode(modeStr)
+			default:
+				return "", InvalidArgumentErrorWithCode(
+					CodeInvalidTransportMode,
+					"invalid transport mode env value",
+					map[string]string{
+						ExtraKeyInput:  modeStr,
+						ExtraKeyEnvVar: EnvMode,
+					},
+				)
+			}
 		}
 	}
 
@@ -61,7 +100,7 @@ func ResolveCHEndpoint(domain string, mode TransportMode) string {
 		if base == "" {
 			base = DefaultUDSBase
 		}
-		return fmt.Sprintf("%s/ch-%s.sock", base, domain)
+		return fmt.Sprintf("%s/ch-%s.sock", base, domain), nil
 	}
 
 	// Distributed mode - K8s DNS
@@ -72,22 +111,45 @@ func ResolveCHEndpoint(domain string, mode TransportMode) string {
 	portStr := os.Getenv(EnvCHPort)
 	port := DefaultCHPort
 	if portStr != "" {
-		if p, err := fmt.Sscanf(portStr, "%d", &port); p != 1 || err != nil {
-			port = DefaultCHPort
+		// strict parse: any garbage (including trailing whitespace) errors loudly.
+		parsed, err := strconv.Atoi(portStr)
+		if err != nil || parsed < 0 || parsed > 65535 {
+			return "", InvalidArgumentErrorWithCode(
+				CodeInvalidPort,
+				"invalid port env value",
+				map[string]string{
+					ExtraKeyInput:  portStr,
+					ExtraKeyEnvVar: EnvCHPort,
+				},
+			)
 		}
+		port = parsed
 	}
-	return fmt.Sprintf("ch-%s.%s.svc:%d", domain, namespace, port)
+	return fmt.Sprintf("ch-%s.%s.svc:%d", domain, namespace, port), nil
 }
 
 // formatEndpoint converts an endpoint to gRPC target format.
-// Supports both TCP (host:port) and Unix Domain Sockets (file paths).
-// UDS paths are detected by leading '/' or './' and converted to unix:// URIs.
+//
+// Audit #39 (lenient UDS prefix detection): supports all four shapes the
+// other clients emit. UDS endpoints become unix:// or unix: URIs per the
+// gRPC name-resolution spec:
+//
+//   - absolute path "/abs/path"   → "unix:///abs/path" (empty authority)
+//   - relative path "./rel/path"  → "unix:./rel/path" (no authority,
+//     leading "./" retained for the gRPC URI resolver)
+//   - already-prefixed "unix:..." → passed through unchanged
+//   - everything else             → TCP host:port (unchanged)
 func formatEndpoint(endpoint string) string {
-	if strings.HasPrefix(endpoint, "/") || strings.HasPrefix(endpoint, "./") {
-		return "unix://" + endpoint
-	}
-	if strings.HasPrefix(endpoint, "unix://") {
+	if strings.HasPrefix(endpoint, "unix:") {
 		return endpoint
+	}
+	if strings.HasPrefix(endpoint, "./") {
+		// Relative UDS path — gRPC URI form is "unix:./rel/path" (no double slash).
+		return "unix:" + endpoint
+	}
+	if strings.HasPrefix(endpoint, "/") {
+		// Absolute UDS path — gRPC URI form is "unix:///abs/path" (empty authority).
+		return "unix://" + endpoint
 	}
 	return endpoint
 }
@@ -131,7 +193,18 @@ func QueryClientFromEnv(envVar, defaultEndpoint string) (*QueryClient, error) {
 }
 
 // QueryClientFromConn creates a client from an existing connection.
+//
+// Deprecated: use QueryClientFromChannel for cross-language naming
+// parity (Py/Rs/Ja/Cs `from_channel` / `FromChannel`). Spec LOW-6.15.
 func QueryClientFromConn(conn *grpc.ClientConn) *QueryClient {
+	return QueryClientFromChannel(conn)
+}
+
+// QueryClientFromChannel creates a client from an existing connection.
+//
+// Cross-language naming: Py `QueryClient.from_channel`, Rs
+// `QueryClient::from_channel`, Ja `QueryClient.fromChannel`. Spec LOW-6.15.
+func QueryClientFromChannel(conn *grpc.ClientConn) *QueryClient {
 	return &QueryClient{
 		inner: pb.NewEventQueryServiceClient(conn),
 		conn:  conn,
@@ -212,7 +285,15 @@ func CommandHandlerClientFromEnv(envVar, defaultEndpoint string) (*CommandHandle
 }
 
 // CommandHandlerClientFromConn creates a client from an existing connection.
+//
+// Deprecated: use CommandHandlerClientFromChannel. Spec LOW-6.15.
 func CommandHandlerClientFromConn(conn *grpc.ClientConn) *CommandHandlerClient {
+	return CommandHandlerClientFromChannel(conn)
+}
+
+// CommandHandlerClientFromChannel creates a client from an existing connection.
+// Spec LOW-6.15.
+func CommandHandlerClientFromChannel(conn *grpc.ClientConn) *CommandHandlerClient {
 	return &CommandHandlerClient{
 		inner: pb.NewCommandHandlerCoordinatorServiceClient(conn),
 		conn:  conn,
@@ -302,7 +383,15 @@ func SpeculativeClientFromEnv(envVar, defaultEndpoint string) (*SpeculativeClien
 }
 
 // SpeculativeClientFromConn creates a client from an existing connection.
+//
+// Deprecated: use SpeculativeClientFromChannel. Spec LOW-6.15.
 func SpeculativeClientFromConn(conn *grpc.ClientConn) *SpeculativeClient {
+	return SpeculativeClientFromChannel(conn)
+}
+
+// SpeculativeClientFromChannel creates a client from an existing connection.
+// Spec LOW-6.15.
+func SpeculativeClientFromChannel(conn *grpc.ClientConn) *SpeculativeClient {
 	return &SpeculativeClient{
 		chStub:        pb.NewCommandHandlerCoordinatorServiceClient(conn),
 		sagaStub:      pb.NewSagaCoordinatorServiceClient(conn),
@@ -399,11 +488,19 @@ func DomainClientFromEnv(envVar, defaultEndpoint string) (*DomainClient, error) 
 }
 
 // DomainClientFromConn creates a client from an existing connection.
+//
+// Deprecated: use DomainClientFromChannel. Spec LOW-6.15.
 func DomainClientFromConn(conn *grpc.ClientConn) *DomainClient {
+	return DomainClientFromChannel(conn)
+}
+
+// DomainClientFromChannel creates a client from an existing connection.
+// Spec LOW-6.15.
+func DomainClientFromChannel(conn *grpc.ClientConn) *DomainClient {
 	return &DomainClient{
-		CommandHandler: CommandHandlerClientFromConn(conn),
-		Query:          QueryClientFromConn(conn),
-		Speculative:    SpeculativeClientFromConn(conn),
+		CommandHandler: CommandHandlerClientFromChannel(conn),
+		Query:          QueryClientFromChannel(conn),
+		Speculative:    SpeculativeClientFromChannel(conn),
 		conn:           conn,
 	}
 }

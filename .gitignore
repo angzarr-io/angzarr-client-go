@@ -32,3 +32,11 @@ proto/**/*pb.go
 # OS
 .DS_Store
 Thumbs.db
+
+# Mutation testing
+.mutants-cache/
+mutation-results/
+mutants-reports/
+
+# Stray sub-workspace clones (must not be committed)
+/angzarr/

@@ -26,7 +26,7 @@
 package angzarr
 
 import (
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
 	"google.golang.org/protobuf/proto"
 )
 

@@ -24,23 +24,54 @@
 package angzarr
 
 import (
+	"log/slog"
 	"reflect"
+	"sync"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
 	"google.golang.org/protobuf/proto"
 )
 
 // projectorOOFunc is an internal type for projection handlers.
 type projectorOOFunc func(data []byte) *pb.Projection
 
+// projectorLoggerMu guards projectorLogger so SetProjectorLogger is safe
+// for concurrent test callers.
+var (
+	projectorLoggerMu sync.RWMutex
+	projectorLogger   = slog.Default()
+)
+
+// SetProjectorLogger overrides the projector's slog.Logger used for
+// catch-all WARN lines. Returns the previous logger so callers (tests)
+// can restore it. Defaults to slog.Default().
+func SetProjectorLogger(l *slog.Logger) *slog.Logger {
+	projectorLoggerMu.Lock()
+	defer projectorLoggerMu.Unlock()
+	prev := projectorLogger
+	if l == nil {
+		projectorLogger = slog.Default()
+	} else {
+		projectorLogger = l
+	}
+	return prev
+}
+
+func getProjectorLogger() *slog.Logger {
+	projectorLoggerMu.RLock()
+	defer projectorLoggerMu.RUnlock()
+	return projectorLogger
+}
+
 // ProjectorBase provides OO-style projector infrastructure.
 //
 // Embed this in your projector struct and call Init() to set up the base.
 // Then register handlers with Projects().
 type ProjectorBase struct {
-	name     string
-	domains  []string
-	handlers map[string]projectorOOFunc
+	name      string
+	domains   []string
+	handlers  map[string]projectorOOFunc
+	onUnknown func(typeURL string)
 }
 
 // Init initializes the projector base with name and domain configuration.
@@ -134,7 +165,27 @@ func (p *ProjectorBase) Projects(handler any) {
 	p.handlers[fullName] = wrapper
 }
 
+// OnUnknown registers a catch-all handler invoked when an event arrives
+// whose type URL matches no registered `Projects` handler.
+//
+// Mirrors Rust's `#[handles_unknown]` attribute on projector methods
+// (commit 804c362). When an unknown type is dispatched, ProjectorBase
+// always emits a WARN log (`projector received event with no matching
+// #[handles] arm`) and additionally invokes this handler if set.
+//
+// The catch-all is opt-in; without it, the WARN still fires and
+// dispatch is a no-op (parity with Rust's macro-generated dispatch).
+func (p *ProjectorBase) OnUnknown(handler func(typeURL string)) {
+	p.onUnknown = handler
+}
+
 // Handle processes an EventBook and returns a Projection.
+//
+// When an event's type URL matches no registered handler, ProjectorBase
+// emits a WARN log via slog (parity with Rust commit 804c362's
+// `tracing::warn!`) and invokes any catch-all handler registered via
+// `OnUnknown`. Unknown events do not abort the projection — known
+// events later in the same book still fire.
 func (p *ProjectorBase) Handle(events *pb.EventBook) (*pb.Projection, error) {
 	if events == nil || events.Cover == nil {
 		return &pb.Projection{Projector: p.name}, nil
@@ -156,12 +207,25 @@ func (p *ProjectorBase) Handle(events *pb.EventBook) (*pb.Projection, error) {
 		typeURL := event.TypeUrl
 
 		// Find handler by exact type match
+		matched := false
 		for fullName, handler := range p.handlers {
 			if typeURL == TypeURLPrefix+fullName {
+				matched = true
 				if projection := handler(event.Value); projection != nil {
 					return projection, nil
 				}
 				break
+			}
+		}
+		if !matched {
+			// Unknown event — WARN + optional catch-all (audit Rust 804c362).
+			getProjectorLogger().Warn(
+				"projector received event with no matching #[handles] arm",
+				slog.String("projector", p.name),
+				slog.String("type_url", typeURL),
+			)
+			if p.onUnknown != nil {
+				p.onUnknown(typeURL)
 			}
 		}
 	}

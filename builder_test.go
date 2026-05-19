@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -36,8 +36,13 @@ func TestNewCommandBuilderNew(t *testing.T) {
 	if b.domain != "orders" {
 		t.Errorf("got domain %q, want %q", b.domain, "orders")
 	}
-	if b.root != nil {
-		t.Error("expected nil root for new aggregate")
+	// Audit #20: root must be auto-generated (client-assigned UUID v4),
+	// not nil. The earlier nil-root contract was the bug.
+	if b.root == nil {
+		t.Fatal("expected auto-generated root, got nil")
+	}
+	if b.root.Version() != 4 {
+		t.Errorf("expected UUID v4, got version %d", b.root.Version())
 	}
 }
 
@@ -365,10 +370,15 @@ func TestQueryBuilder_AsOfSequence(t *testing.T) {
 }
 
 func TestQueryBuilder_AsOfTime(t *testing.T) {
+	// MED-3.5: AsOfTime returns (*QueryBuilder, error) so a parse failure
+	// surfaces at the call site (audit #34). The deferred-err path on the
+	// builder has been retired.
 	t.Run("valid timestamp", func(t *testing.T) {
 		b := &QueryBuilder{}
-		result := b.AsOfTime("2024-01-15T10:30:00Z")
-
+		result, err := b.AsOfTime("2024-01-15T10:30:00Z")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if result != b {
 			t.Error("expected same builder returned")
 		}
@@ -378,19 +388,12 @@ func TestQueryBuilder_AsOfTime(t *testing.T) {
 		if b.temporal.GetAsOfTime() == nil {
 			t.Error("expected non-nil timestamp")
 		}
-		if b.err != nil {
-			t.Errorf("unexpected error: %v", b.err)
-		}
 	})
 
 	t.Run("invalid timestamp", func(t *testing.T) {
 		b := &QueryBuilder{}
-		result := b.AsOfTime("not a timestamp")
-
-		if result != b {
-			t.Error("expected same builder returned")
-		}
-		if b.err == nil {
+		_, err := b.AsOfTime("not a timestamp")
+		if err == nil {
 			t.Error("expected error for invalid timestamp")
 		}
 	})
@@ -493,8 +496,12 @@ func TestCommandHandlerClient_CommandNew(t *testing.T) {
 	if b.client != client {
 		t.Error("client mismatch")
 	}
-	if b.root != nil {
-		t.Error("expected nil root")
+	// Audit #20: CommandNew auto-generates a UUID v4 root.
+	if b.root == nil {
+		t.Fatal("expected auto-generated root")
+	}
+	if b.root.Version() != 4 {
+		t.Errorf("expected UUID v4, got version %d", b.root.Version())
 	}
 }
 

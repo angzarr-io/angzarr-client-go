@@ -10,7 +10,7 @@ import (
 	"reflect"
 	"strings"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -662,8 +662,10 @@ func (r *CommandHandlerRouter[S]) Dispatch(cmd *pb.ContextualCommand) (*pb.Busin
 
 	typeURL := commandAny.TypeUrl
 
-	// Check for Notification (rejection/compensation) — exact match
-	if strings.HasSuffix(typeURL, "Notification") {
+	// MED-4.5 / audit #25: exact type-URL match. A user-defined proto
+	// whose name happens to end in "Notification" must NOT be misrouted
+	// as a rejection.
+	if IsNotificationTypeURL(typeURL) {
 		return r.dispatchCHNotification(commandAny, state)
 	}
 
@@ -723,6 +725,72 @@ func (r *CommandHandlerRouter[S]) dispatchCHNotification(commandAny *anypb.Any, 
 			}},
 		}, nil
 	}
+}
+
+// ============================================================================
+// CommandHandlerRegistry -- multi-handler ban (audit #18 / #72)
+// ============================================================================
+//
+// Python `Router.build()` and Rust `Router::build()` raise
+// DUPLICATE_COMMAND_HANDLER when two CommandHandlers register for the
+// same (domain, command_type_url) pair. Go's typed-router design
+// already enforces single-handler-per-router by construction
+// (`NewCommandHandlerRouter` takes ONE handler), but a higher-level
+// composition that aggregates multiple routers needs to detect
+// overlapping coverage. CommandHandlerRegistry is that detector.
+//
+// Saga / PM / projector fan-out is unaffected — those kinds legitimately
+// broadcast and are not registered here.
+
+// commandHandlerRouterLike is the minimal interface CommandHandlerRegistry
+// needs from a router: the (domain, command-types) pair. CommandHandlerRouter[S]
+// for any S satisfies it.
+type commandHandlerRouterLike interface {
+	Domain() string
+	CommandTypes() []string
+}
+
+// CommandHandlerRegistry aggregates CommandHandlerRouters and rejects
+// duplicate (domain, command_type_url) registration with the
+// cross-language DUPLICATE_COMMAND_HANDLER code.
+//
+// Mirrors Python `router/builder.py:183` and Rust
+// `router/builder.rs:130`.
+type CommandHandlerRegistry struct {
+	// seen[domain][commandType] = true once registered.
+	seen map[string]map[string]bool
+}
+
+// NewCommandHandlerRegistry builds an empty registry.
+func NewCommandHandlerRegistry() *CommandHandlerRegistry {
+	return &CommandHandlerRegistry{seen: make(map[string]map[string]bool)}
+}
+
+// Register adds a CommandHandlerRouter. Returns a ClientError with
+// Code=DUPLICATE_COMMAND_HANDLER on the first overlap.
+//
+// Different domains may register the same command type (audit #18,
+// scenario C-0011). A single router with multiple command types is
+// always allowed (C-0012).
+func (r *CommandHandlerRegistry) Register(router commandHandlerRouterLike) error {
+	domain := router.Domain()
+	if _, ok := r.seen[domain]; !ok {
+		r.seen[domain] = make(map[string]bool)
+	}
+	for _, cmdType := range router.CommandTypes() {
+		if r.seen[domain][cmdType] {
+			return InvalidArgumentErrorWithCode(
+				CodeDuplicateCommandHandler,
+				MessageDuplicateCommandHandler,
+				map[string]string{
+					ExtraKeyDomain:  domain,
+					ExtraKeyTypeURL: cmdType,
+				},
+			)
+		}
+		r.seen[domain][cmdType] = true
+	}
+	return nil
 }
 
 // ============================================================================
@@ -794,8 +862,8 @@ func (r *SagaRouter) Dispatch(source *pb.EventBook, destinationSequences map[str
 		return nil, status.Error(codes.InvalidArgument, "missing event payload")
 	}
 
-	// Check for Notification (rejection/compensation) — exact match
-	if strings.HasSuffix(eventAny.TypeUrl, "Notification") {
+	// MED-4.5 / audit #25: exact type-URL match.
+	if IsNotificationTypeURL(eventAny.TypeUrl) {
 		return r.dispatchSagaNotification(eventAny)
 	}
 
@@ -935,8 +1003,8 @@ func (r *ProcessManagerRouter[S]) Dispatch(
 
 	state := r.rebuild(processState)
 
-	// Check for Notification — exact match
-	if strings.HasSuffix(eventAny.TypeUrl, "Notification") {
+	// MED-4.5 / audit #25: exact type-URL match.
+	if IsNotificationTypeURL(eventAny.TypeUrl) {
 		return r.dispatchPMNotification(handler, eventAny, state)
 	}
 

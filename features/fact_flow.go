@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	angzarr "github.com/benjaminabbitt/angzarr/client/go"
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
 	"github.com/cucumber/godog"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/anypb"

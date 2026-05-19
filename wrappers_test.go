@@ -3,7 +3,7 @@ package angzarr
 import (
 	"testing"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/anypb"
 )

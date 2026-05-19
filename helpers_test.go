@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -18,7 +18,9 @@ func TestConstants(t *testing.T) {
 	}{
 		{"UnknownDomain", UnknownDomain, "unknown"},
 		{"WildcardDomain", WildcardDomain, "*"},
-		{"DefaultEdition", DefaultEdition, "angzarr"},
+		// HIGH-2.1: DEFAULT_EDITION is the empty string across all
+		// languages so cache_key prefixes are equal cross-language.
+		{"DefaultEdition", DefaultEdition, ""},
 		{"MetaAngzarrDomain", MetaAngzarrDomain, "_angzarr"},
 		{"ProjectionDomainPrefix", ProjectionDomainPrefix, "_projection"},
 		{"CorrelationIDHeader", CorrelationIDHeader, "x-correlation-id"},
@@ -350,6 +352,9 @@ func TestIsMainTimeline(t *testing.T) {
 }
 
 func TestDivergenceFor(t *testing.T) {
+	// MED-2.7: DivergenceFor returns (uint32, bool) — the deprecated -1
+	// sentinel form has been retired so it can no longer be confused with
+	// a real divergence sequence 0.
 	edition := &pb.Edition{
 		Name: "branch",
 		Divergences: []*pb.DomainDivergence{
@@ -359,22 +364,23 @@ func TestDivergenceFor(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		edition *pb.Edition
-		domain  string
-		want    int64
+		name     string
+		edition  *pb.Edition
+		domain   string
+		wantSeq  uint32
+		wantHave bool
 	}{
-		{"existing domain", edition, "orders", 10},
-		{"another domain", edition, "inventory", 5},
-		{"missing domain", edition, "shipping", -1},
-		{"nil edition", nil, "orders", -1},
+		{"existing domain", edition, "orders", 10, true},
+		{"another domain", edition, "inventory", 5, true},
+		{"missing domain", edition, "shipping", 0, false},
+		{"nil edition", nil, "orders", 0, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := DivergenceFor(tt.edition, tt.domain)
-			if got != tt.want {
-				t.Errorf("got %d, want %d", got, tt.want)
+			seq, ok := DivergenceFor(tt.edition, tt.domain)
+			if seq != tt.wantSeq || ok != tt.wantHave {
+				t.Errorf("got (%d, %v), want (%d, %v)", seq, ok, tt.wantSeq, tt.wantHave)
 			}
 		})
 	}
@@ -475,7 +481,9 @@ func TestEventsFromResponse(t *testing.T) {
 }
 
 func TestTypeURL(t *testing.T) {
-	got := TypeURL("examples", "CreateCart")
+	// MED-2.8: TypeURL takes a single fully-qualified name matching the
+	// Py/Rs/Ja/Cs/Cpp shape.
+	got := TypeURL("examples.CreateCart")
 	want := "type.googleapis.com/examples.CreateCart"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
