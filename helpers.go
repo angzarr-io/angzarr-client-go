@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"github.com/google/uuid"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
@@ -25,7 +25,7 @@ const (
 	DefaultEdition         = ""
 	MetaAngzarrDomain      = "_angzarr"
 	ProjectionDomainPrefix = "_projection"
-	ProjectionTypeURL      = "angzarr_client.proto.angzarr.Projection"
+	ProjectionTypeURL      = "angzarr_client.proto.angzarr.v1.Projection"
 	CorrelationIDHeader    = "x-correlation-id"
 	TypeURLPrefix          = "type.googleapis.com/"
 )
@@ -34,7 +34,7 @@ const (
 // rejection notifications. Routers MUST exact-match on this URL when
 // deciding to invoke the compensation path (MED-4.5). Suffix-match risks
 // misrouting any user-defined proto type whose name ends in "Notification".
-const NotificationTypeURL = TypeURLPrefix + "angzarr_client.proto.angzarr.Notification"
+const NotificationTypeURL = TypeURLPrefix + "angzarr_client.proto.angzarr.v1.Notification"
 
 // IsNotificationTypeURL returns true iff the type_url exactly equals the
 // canonical NotificationTypeURL. Exact match per MED-4.5 / audit #25.

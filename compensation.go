@@ -26,12 +26,12 @@
 package angzarr
 
 import (
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"google.golang.org/protobuf/proto"
 )
 
 // NotificationTypeName is the fully-qualified proto type name for Notification.
-const NotificationTypeName = "angzarr_client.proto.angzarr.Notification"
+const NotificationTypeName = "angzarr_client.proto.angzarr.v1.Notification"
 
 // CompensationContext provides easy access to rejection details.
 type CompensationContext struct {

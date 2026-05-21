@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )

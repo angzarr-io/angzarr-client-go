@@ -51,7 +51,7 @@ import (
 	"strings"
 	"sync"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
@@ -540,7 +540,7 @@ func (a *CommandHandlerBase[S]) Handle(request *pb.ContextualCommand) (*pb.Busin
 	}
 
 	// Check for Notification (rejection/compensation)
-	if cmdAny.TypeUrl == TypeURLPrefix+"angzarr_client.proto.angzarr.Notification" {
+	if cmdAny.TypeUrl == TypeURLPrefix+"angzarr_client.proto.angzarr.v1.Notification" {
 		return a.dispatchRejection(cmdAny)
 	}
 

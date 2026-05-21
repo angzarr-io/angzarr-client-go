@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -35,6 +35,21 @@ type CommandRejectedError struct {
 
 func (e CommandRejectedError) Error() string {
 	return e.Message
+}
+
+// GrpcCode maps the rejection's StatusCode to a gRPC status code. Mirrors the
+// Python/Rust mapping: FAILED_PRECONDITION → FailedPrecondition,
+// INVALID_ARGUMENT → InvalidArgument, NOT_FOUND → NotFound. An empty or
+// unrecognized StatusCode defaults to FailedPrecondition (legacy callers).
+func (e CommandRejectedError) GrpcCode() codes.Code {
+	switch e.StatusCode {
+	case "INVALID_ARGUMENT":
+		return codes.InvalidArgument
+	case "NOT_FOUND":
+		return codes.NotFound
+	default:
+		return codes.FailedPrecondition
+	}
 }
 
 // NewCommandRejectedError creates a FAILED_PRECONDITION error (default for guard failures).
@@ -156,7 +171,7 @@ func (h *CommandHandlerGrpc[S]) dispatch(req *pb.ContextualCommand) (*pb.Busines
 	if err != nil {
 		var rejected CommandRejectedError
 		if errors.As(err, &rejected) {
-			return nil, status.Error(codes.FailedPrecondition, rejected.Message)
+			return nil, status.Error(rejected.GrpcCode(), rejected.Message)
 		}
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -233,7 +248,7 @@ func (h *SagaHandler) Handle(ctx context.Context, req *pb.SagaHandleRequest) (*p
 	if err != nil {
 		var rejected CommandRejectedError
 		if errors.As(err, &rejected) {
-			return nil, status.Error(codes.FailedPrecondition, rejected.Message)
+			return nil, status.Error(rejected.GrpcCode(), rejected.Message)
 		}
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -306,7 +321,7 @@ func (h *TraitCommandHandlerGrpc[S]) dispatch(req *pb.ContextualCommand) (*pb.Bu
 	if err != nil {
 		var rejected CommandRejectedError
 		if errors.As(err, &rejected) {
-			return nil, status.Error(codes.FailedPrecondition, rejected.Message)
+			return nil, status.Error(rejected.GrpcCode(), rejected.Message)
 		}
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -369,7 +384,7 @@ func (h *TraitSagaHandler) Handle(ctx context.Context, req *pb.SagaHandleRequest
 	if err != nil {
 		var rejected CommandRejectedError
 		if errors.As(err, &rejected) {
-			return nil, status.Error(codes.FailedPrecondition, rejected.Message)
+			return nil, status.Error(rejected.GrpcCode(), rejected.Message)
 		}
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -410,7 +425,7 @@ func (h *TraitProcessManagerHandler[S]) Handle(ctx context.Context, req *pb.Proc
 	if err != nil {
 		var rejected CommandRejectedError
 		if errors.As(err, &rejected) {
-			return nil, status.Error(codes.FailedPrecondition, rejected.Message)
+			return nil, status.Error(rejected.GrpcCode(), rejected.Message)
 		}
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -696,7 +711,7 @@ func (h *OOCommandHandlerGrpc[S, A]) dispatch(req *pb.ContextualCommand) (*pb.Bu
 	if err != nil {
 		var rejected CommandRejectedError
 		if errors.As(err, &rejected) {
-			return nil, status.Error(codes.FailedPrecondition, rejected.Message)
+			return nil, status.Error(rejected.GrpcCode(), rejected.Message)
 		}
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -754,7 +769,7 @@ func (h *OOSagaHandler) Handle(ctx context.Context, req *pb.SagaHandleRequest) (
 	if err != nil {
 		var rejected CommandRejectedError
 		if errors.As(err, &rejected) {
-			return nil, status.Error(codes.FailedPrecondition, rejected.Message)
+			return nil, status.Error(rejected.GrpcCode(), rejected.Message)
 		}
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -813,7 +828,7 @@ func (h *OOProcessManagerHandler) Handle(ctx context.Context, req *pb.ProcessMan
 	if err != nil {
 		var rejected CommandRejectedError
 		if errors.As(err, &rejected) {
-			return nil, status.Error(codes.FailedPrecondition, rejected.Message)
+			return nil, status.Error(rejected.GrpcCode(), rejected.Message)
 		}
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}

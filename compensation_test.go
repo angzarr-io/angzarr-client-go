@@ -3,7 +3,7 @@ package angzarr
 import (
 	"testing"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
@@ -45,7 +45,7 @@ func TestRejectionHandlerResponse_EventsOnly(t *testing.T) {
 
 func TestRejectionHandlerResponse_NotificationOnly(t *testing.T) {
 	notification := &pb.Notification{
-		Payload: &anypb.Any{TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.RejectionNotification"},
+		Payload: &anypb.Any{TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.v1.RejectionNotification"},
 	}
 
 	response := &RejectionHandlerResponse{Notification: notification}
@@ -65,7 +65,7 @@ func TestRejectionHandlerResponse_BothEventsAndNotification(t *testing.T) {
 		},
 	}
 	notification := &pb.Notification{
-		Payload: &anypb.Any{TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.RejectionNotification"},
+		Payload: &anypb.Any{TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.v1.RejectionNotification"},
 	}
 
 	response := &RejectionHandlerResponse{
@@ -111,7 +111,7 @@ func TestRejectionHandlerResponse_NotificationPayloadAccessible(t *testing.T) {
 
 	notification := &pb.Notification{
 		Payload: &anypb.Any{
-			TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.RejectionNotification",
+			TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.v1.RejectionNotification",
 			Value:   rejectionBytes,
 		},
 	}
@@ -136,13 +136,13 @@ func TestIsNotification(t *testing.T) {
 		typeURL  string
 		expected bool
 	}{
-		{"type.googleapis.com/angzarr_client.proto.angzarr.Notification", true},
+		{"type.googleapis.com/angzarr_client.proto.angzarr.v1.Notification", true},
 		{"type.googleapis.com/test.SomeNotification", false}, // Different type, not the real Notification
 		{"type.googleapis.com/test.SomeCommand", false},
 		{"type.googleapis.com/test.SomeEvent", false},
 		{"Notification", false},                              // Incomplete type URL
 		{"NotificationEvent", false},                         // Different type
-		{"angzarr_client.proto.angzarr.Notification", false}, // Missing prefix
+		{"angzarr_client.proto.angzarr.v1.Notification", false}, // Missing prefix
 	}
 
 	for _, tc := range tests {
@@ -177,7 +177,7 @@ func TestCompensationContext(t *testing.T) {
 
 	notification := &pb.Notification{
 		Payload: &anypb.Any{
-			TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.RejectionNotification",
+			TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.v1.RejectionNotification",
 			Value:   rejectionBytes,
 		},
 	}

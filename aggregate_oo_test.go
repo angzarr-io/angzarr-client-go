@@ -3,7 +3,7 @@ package angzarr
 import (
 	"testing"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
@@ -335,7 +335,7 @@ func TestCommandHandlerBase_DispatchRejection_EdgeCases(t *testing.T) {
 		notification := &pb.Notification{Payload: nil}
 		notificationBytes, _ := proto.Marshal(notification)
 		notificationAny := &anypb.Any{
-			TypeUrl: TypeURLPrefix + "angzarr_client.proto.angzarr.Notification",
+			TypeUrl: TypeURLPrefix + "angzarr_client.proto.angzarr.v1.Notification",
 			Value:   notificationBytes,
 		}
 

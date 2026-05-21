@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -552,52 +552,3 @@ func (c *DomainClient) Close() error {
 	return nil
 }
 
-// Deprecated: Client is deprecated. Use DomainClient instead, which now includes
-// Speculative sub-client. Client will be removed in a future release.
-type Client struct {
-	CommandHandler *CommandHandlerClient
-	Query          *QueryClient
-	Speculative    *SpeculativeClient
-	conn           *grpc.ClientConn
-}
-
-// NewClient connects to a server providing all services.
-func NewClient(endpoint string) (*Client, error) {
-	conn, err := grpc.NewClient(formatEndpoint(endpoint), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return nil, TransportError(err)
-	}
-	return &Client{
-		CommandHandler: CommandHandlerClientFromConn(conn),
-		Query:          QueryClientFromConn(conn),
-		Speculative:    SpeculativeClientFromConn(conn),
-		conn:           conn,
-	}, nil
-}
-
-// ClientFromEnv connects using an environment variable with fallback.
-func ClientFromEnv(envVar, defaultEndpoint string) (*Client, error) {
-	endpoint := os.Getenv(envVar)
-	if endpoint == "" {
-		endpoint = defaultEndpoint
-	}
-	return NewClient(endpoint)
-}
-
-// ClientFromConn creates a client from an existing connection.
-func ClientFromConn(conn *grpc.ClientConn) *Client {
-	return &Client{
-		CommandHandler: CommandHandlerClientFromConn(conn),
-		Query:          QueryClientFromConn(conn),
-		Speculative:    SpeculativeClientFromConn(conn),
-		conn:           conn,
-	}
-}
-
-// Close closes the underlying connection.
-func (c *Client) Close() error {
-	if c.conn != nil {
-		return c.conn.Close()
-	}
-	return nil
-}

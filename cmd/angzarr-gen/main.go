@@ -302,7 +302,7 @@ package {{.Package}}
 
 import (
 	angzarr "github.com/angzarr/client/go"
-	pb "github.com/angzarr/client/go/proto/angzarr"
+	pb "github.com/angzarr/client/go/proto/angzarr/v1"
 )
 
 // New{{.TypeName}}Router creates a CommandRouter from the {{.TypeName}}'s annotated methods.

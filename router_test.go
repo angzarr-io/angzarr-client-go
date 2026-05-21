@@ -3,7 +3,7 @@ package angzarr
 import (
 	"testing"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
@@ -886,7 +886,7 @@ func TestCommandHandlerRouterDispatchNotification(t *testing.T) {
 	notification := &pb.Notification{}
 	notificationBytes, _ := proto.Marshal(notification)
 	notificationAny := &anypb.Any{
-		TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.Notification",
+		TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.v1.Notification",
 		Value:   notificationBytes,
 	}
 
@@ -932,7 +932,7 @@ func TestCommandHandlerRouterDispatchNotificationReturnsRevocation(t *testing.T)
 	notification := &pb.Notification{}
 	notificationBytes, _ := proto.Marshal(notification)
 	notificationAny := &anypb.Any{
-		TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.Notification",
+		TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.v1.Notification",
 		Value:   notificationBytes,
 	}
 
@@ -1015,7 +1015,7 @@ func TestProcessManagerRouterDispatchNotification(t *testing.T) {
 	notification := &pb.Notification{}
 	notificationBytes, _ := proto.Marshal(notification)
 	notificationAny := &anypb.Any{
-		TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.Notification",
+		TypeUrl: "type.googleapis.com/angzarr_client.proto.angzarr.v1.Notification",
 		Value:   notificationBytes,
 	}
 

@@ -1,7 +1,7 @@
 package angzarr
 
 import (
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 )
 
 // Deprecated: SagaContext is deprecated. Use Destinations directly instead.

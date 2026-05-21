@@ -27,7 +27,7 @@ package angzarr
 import (
 	"fmt"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 )
 
 // Destinations provides access to destination sequences for command stamping.

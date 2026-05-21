@@ -3,7 +3,7 @@ package features
 import (
 	"fmt"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"github.com/cucumber/godog"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -343,7 +343,7 @@ func (c *CompensationContext) whenBuildNotification() error {
 	}{
 		Cover:       struct{}{},
 		SentAt:      timestamppb.Now(),
-		PayloadType: "type.googleapis.com/angzarr_client.proto.angzarr.RejectionNotification",
+		PayloadType: "type.googleapis.com/angzarr_client.proto.angzarr.v1.RejectionNotification",
 	}
 	return nil
 }

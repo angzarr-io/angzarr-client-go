@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -522,34 +522,6 @@ func TestDomainClientFromConn(t *testing.T) {
 	}
 }
 
-// Client tests
-
-func TestClient_Close(t *testing.T) {
-	t.Run("nil connection", func(t *testing.T) {
-		client := &Client{conn: nil}
-		err := client.Close()
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
-}
-
-func TestClientFromConn(t *testing.T) {
-	client := ClientFromConn(nil)
-	if client == nil {
-		t.Error("expected non-nil client")
-	}
-	if client.CommandHandler == nil {
-		t.Error("expected non-nil CommandHandler")
-	}
-	if client.Query == nil {
-		t.Error("expected non-nil Query")
-	}
-	if client.Speculative == nil {
-		t.Error("expected non-nil Speculative")
-	}
-}
-
 // FromEnv tests
 
 func TestQueryClientFromEnv(t *testing.T) {
@@ -611,12 +583,3 @@ func TestDomainClientFromEnv(t *testing.T) {
 	})
 }
 
-func TestClientFromEnv(t *testing.T) {
-	t.Run("uses env var when set", func(t *testing.T) {
-		os.Setenv("TEST_CLIENT_ENDPOINT_12345", "localhost:99999")
-		defer os.Unsetenv("TEST_CLIENT_ENDPOINT_12345")
-
-		_, err := ClientFromEnv("TEST_CLIENT_ENDPOINT_12345", "default:8000")
-		_ = err
-	})
-}

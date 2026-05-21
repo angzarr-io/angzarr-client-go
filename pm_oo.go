@@ -32,7 +32,7 @@ import (
 	"fmt"
 	"reflect"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
@@ -381,7 +381,7 @@ func (pm *ProcessManagerBase[S]) Handle(trigger, processState *pb.EventBook, des
 		typeURL := event.TypeUrl
 
 		// Check for Notification (rejection/compensation)
-		if typeURL == TypeURLPrefix+"angzarr_client.proto.angzarr.Notification" {
+		if typeURL == TypeURLPrefix+"angzarr_client.proto.angzarr.v1.Notification" {
 			resp := pm.handleNotification(state, event)
 			if resp != nil {
 				if resp.Events != nil {

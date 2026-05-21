@@ -42,7 +42,7 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -760,7 +760,7 @@ func TestRouter_AddUpcaster_Built(t *testing.T) {
 // ============================================================================
 
 func TestNotificationTypeURL_Constant(t *testing.T) {
-	want := TypeURLPrefix + "angzarr_client.proto.angzarr.Notification"
+	want := TypeURLPrefix + "angzarr_client.proto.angzarr.v1.Notification"
 	if NotificationTypeURL != want {
 		t.Errorf("NotificationTypeURL = %q, want %q", NotificationTypeURL, want)
 	}

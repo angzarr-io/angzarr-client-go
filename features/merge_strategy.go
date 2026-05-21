@@ -3,7 +3,7 @@ package features
 import (
 	"fmt"
 
-	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr"
+	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"github.com/cucumber/godog"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
