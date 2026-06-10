@@ -1215,23 +1215,12 @@ func InitAggregateClientSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^I execute a "([^"]*)" command for root "([^"]*)" at sequence (\d+)$`, c.iExecuteACommandForRootAtSequence)
 	ctx.Step(`^the aggregate should now exist with (\d+) event$`, c.theAggregateShouldNowExistWithEvents)
 
-	// Handler Pattern
-	ctx.Step(`^an aggregate handler$`, c.anAggregateHandler)
-	ctx.Step(`^an aggregate handler with validation$`, c.anAggregateHandlerWithValidation)
-	ctx.Step(`^an aggregate with guard checking aggregate exists$`, c.anAggregateWithGuardCheckingAggregateExists)
-	ctx.Step(`^a handler emits (\d+) events$`, c.aHandlerEmitsEvents)
-	ctx.Step(`^a handler produces a command$`, c.aHandlerProducesACommand)
-	ctx.Step(`^guard and validate pass$`, c.guardAndValidatePass)
-	ctx.Step(`^guard should reject$`, c.guardShouldReject)
-	ctx.Step(`^compute should produce events$`, c.computeShouldProduceEvents)
-	ctx.Step(`^events should reflect the state change$`, c.eventsShouldReflectTheStateChange)
-	// NOTE: Single-arg router step is registered in InitializeAggregateScenario on AggregateContext
-	ctx.Step(`^a router with handler for protobuf message type$`, c.aRouterWithHandlerForProtobufMessageType)
+	// Handler Pattern / router steps moved to features/router.go
+	// (InitRouterSteps), which drives the real CommandRouter, EventRouter,
+	// SagaRouter, ProcessManagerRouter and ProjectorRouter instead of
+	// simulating dispatch. Coordinator-side router scenarios are @wip in
+	// router.feature and intentionally unbound.
 	// NOTE: "an EventBook should be returned" is registered by QueryContext
-	ctx.Step(`^events: OrderCreated, ItemAdded, ItemAdded$`, c.eventsOrderCreatedItemAddedItemAdded)
-	// NOTE: "all (\d+) events should be processed in order$" is registered by AggregateContext in InitializeAggregateScenario
-	ctx.Step(`^each should be processed independently$`, c.eachShouldBeProcessedIndependently)
-	ctx.Step(`^events with different correlation IDs should have separate state$`, c.eventsWithDifferentCorrelationIDsShouldHaveSeparateState)
 
 	// Snapshot and Query
 	ctx.Step(`^a snapshot at sequence (\d+)$`, c.aSnapshotAtSequence)
@@ -1239,6 +1228,165 @@ func InitAggregateClientSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^a QueryClient implementation$`, c.aQueryClientImplementation)
 	ctx.Step(`^events (\d+), (\d+), (\d+)$`, c.events)
 	ctx.Step(`^events with type_urls:$`, c.eventsWithType_urls)
+
+	// --- New (Batch 6+7) phrases from the rewritten aggregate_client.feature ---
+	// "AggregateClient" → "client", "I execute" → "I send",
+	// "fail with precondition error" → "refused because the aggregate has
+	// moved on", and many other reworded scenario lines. Stubs FAIL until
+	// wired through to real assertions.
+
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^a client connected to the test backend$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I send a "([^"]*)" command with data "([^"]*)"$`, func(cmd, data string) error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the command is accepted$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^a single "([^"]*)" event is recorded$`, func(eventType string) error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I send an "([^"]*)" command at sequence (\d+)$`, func(cmd string, seq int) error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the new events continue the history from sequence (\d+)$`, func(seq int) error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I send a command tagged with correlation ID "([^"]*)"$`, func(cid string) error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the resulting events carry correlation ID "([^"]*)"$`, func(cid string) error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I send a command at sequence (\d+)$`, func(seq int) error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the command is refused because the aggregate has moved on$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^one command is accepted$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the other is refused because the aggregate has moved on$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I look up the current sequence for "([^"]*)" root "([^"]*)"$`, func(domain, root string) error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I retry the command at that sequence$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I send a command without waiting for downstream work$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the response returns before any projectors have caught up$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I send a command and wait for projectors$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the response reflects the projectors having processed the event$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I send a command and wait for downstream sagas$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the response reflects the downstream sagas having completed$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I send a command with a malformed payload$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the command is refused as invalid$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I send a command missing required fields$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the refusal names the missing field$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I send a command to domain "([^"]*)"$`, func(domain string) error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the command is refused because the domain is unknown$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I send a command that produces (\d+) events$`, func(n int) error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^(\d+) events are recorded$`, func(n int) error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the events occupy consecutive sequences starting at (\d+)$`, func(seq int) error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I read back the events for "([^"]*)" root "([^"]*)"$`, func(domain, root string) error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^either all (\d+) events are present or none of them are$`, func(n int) error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I attempt to send a command$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the call fails because the service cannot be reached$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the aggregate service does not respond in time$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I send a command with a short timeout$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the call fails because the deadline was exceeded$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I send a "([^"]*)" command for root "([^"]*)" at sequence (\d+)$`, func(cmd, root string, seq int) error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the aggregate now exists with one event$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
 }
 
 func InitializeAggregateScenario(ctx *godog.ScenarioContext) {
@@ -1247,72 +1395,15 @@ func InitializeAggregateScenario(ctx *godog.ScenarioContext) {
 	// Initialize aggregate client steps too
 	InitAggregateClientSteps(ctx)
 
-	// Aggregate Router
-	ctx.Step(`^an aggregate router with handlers for "([^"]*)" and "([^"]*)"$`, c.anAggregateRouterWithHandlersForAnd)
-	ctx.Step(`^an aggregate router with handlers for "([^"]*)"$`, c.anAggregateRouterWithHandlersFor)
-	ctx.Step(`^an aggregate router$`, c.anAggregateRouter)
-	ctx.Step(`^an aggregate with existing events$`, c.anAggregateWithExistingEvents)
-	ctx.Step(`^an aggregate at sequence (\d+)$`, c.anAggregateAtSequence)
-	ctx.Step(`^I receive an? "([^"]*)" command$`, c.iReceiveACommand)
-	ctx.Step(`^I receive a command for that aggregate$`, c.iReceiveACommandForThatAggregate)
-	ctx.Step(`^I receive a command at sequence (\d+)$`, c.iReceiveACommandAtSequence)
-	ctx.Step(`^the ([^"]*) handler should be invoked$`, c.theHandlerShouldBeInvoked)
-	ctx.Step(`^the ([^"]*) handler should NOT be invoked$`, c.theHandlerShouldNOTBeInvoked)
-	ctx.Step(`^the router should load the EventBook first$`, c.theRouterShouldLoadTheEventBookFirst)
-	ctx.Step(`^the handler should receive the reconstructed state$`, c.theHandlerShouldReceiveTheReconstructedState)
-	ctx.Step(`^the router should return an error$`, c.theRouterShouldReturnAnError)
-	ctx.Step(`^the error should indicate unknown command type$`, c.theErrorShouldIndicateUnknownCommandType)
-	ctx.Step(`^no handler should be invoked$`, c.noHandlerShouldBeInvoked)
-
-	// Saga Router
-	ctx.Step(`^a saga router with handlers for "([^"]*)" and "([^"]*)"$`, c.aSagaRouterWithHandlersForAnd)
-	ctx.Step(`^a saga router$`, c.aSagaRouter)
-	ctx.Step(`^I receive an "([^"]*)" event$`, c.iReceiveAnEvent)
-
-	// PM Router
-	ctx.Step(`^a PM router with handlers for "([^"]*)" and "([^"]*)"$`, c.aPMRouterWithHandlersForAnd)
-	ctx.Step(`^a PM router$`, c.aPMRouter)
-	ctx.Step(`^I receive an "([^"]*)" event from domain "([^"]*)"$`, c.iReceiveAnEventFromDomain)
-	ctx.Step(`^I receive an event without correlation ID$`, c.iReceiveAnEventWithoutCorrelationID)
-	ctx.Step(`^the event should be skipped$`, c.theEventShouldBeSkipped)
-
-	// Projector Router
-	ctx.Step(`^a projector router with handlers for "([^"]*)"$`, c.aProjectorRouterWithHandlersFor)
-	ctx.Step(`^a projector router$`, c.aProjectorRouter)
-	ctx.Step(`^I receive (\d+) events in a batch$`, c.iReceiveEventsInABatch)
-	ctx.Step(`^all (\d+) events should be processed in order$`, c.allEventsShouldBeProcessedInOrderAgg)
-	ctx.Step(`^the router projection state should be returned$`, c.theFinalProjectionStateShouldBeReturned)
-
-	// Saga rejection handling
-	// NOTE: "a saga command that was rejected$" is registered by CompensationContext
-	ctx.Step(`^a saga router with a rejected command$`, c.aSagaRouterWithARejectedCommand)
-	ctx.Step(`^the router processes the rejection$`, c.theRouterProcessesTheRejection)
-
-	// Error handling in routers
-	ctx.Step(`^I receive an event with invalid payload$`, c.iReceiveAnEventWithInvalidPayload)
-	ctx.Step(`^state building fails$`, c.stateBuildingFails)
-
-	// Guard/Validate/Compute pattern
-	ctx.Step(`^validate should reject$`, c.validateShouldReject)
-	ctx.Step(`^rejection reason should describe the issue$`, c.rejectionReasonShouldDescribeTheIssue)
-	// NOTE: "compute should produce events$" is registered by AggregateClientContext in InitAggregateClientSteps
-
-	// Handler Registration
-	ctx.Step(`^a router$`, c.aRouter)
-	ctx.Step(`^I register handler for type "([^"]*)"$`, c.iRegisterHandlerForType)
-	ctx.Step(`^I register handlers for "([^"]*)", "([^"]*)", and "([^"]*)"$`, c.iRegisterHandlersForAndAnd)
-	ctx.Step(`^events ending with "([^"]*)" should match$`, c.eventsEndingWithShouldMatch)
-	ctx.Step(`^events ending with "([^"]*)" should NOT match$`, c.eventsEndingWithShouldNOTMatch)
-	ctx.Step(`^all three types should be routable$`, c.allThreeTypesShouldBeRoutable)
-	ctx.Step(`^each should invoke its specific handler$`, c.eachShouldInvokeItsSpecificHandler)
+	// Router dispatch steps moved to features/router.go (InitRouterSteps),
+	// which drives the real routers. Steps for @wip coordinator-side
+	// scenarios (sequence gating, correlation guard, speculative mode,
+	// position tracking, subscription token matching) are intentionally
+	// left unbound so those scenarios report pending rather than passing
+	// vacuously.
 
 	// Client capability assertions
 	ctx.Step(`^I should receive no events$`, c.iShouldReceiveNoEvents)
-	ctx.Step(`^I speculatively process events$`, c.iSpeculativelyProcessEvents)
-	ctx.Step(`^no event should be emitted$`, c.noEventShouldBeEmitted)
-	ctx.Step(`^no events for the aggregate$`, c.noEventsForTheAggregate)
-	ctx.Step(`^no events should be emitted$`, c.noEventsShouldBeEmitted)
-	ctx.Step(`^no external side effects should occur$`, c.noExternalSideEffectsShouldOccur)
 	// NOTE: "only the event pages should be returned$" is registered by QueryBuilderContext
 	ctx.Step(`^only the v(\d+) event should match$`, c.onlyTheVEventShouldMatch)
 	ctx.Step(`^the client should be able to execute commands$`, c.theClientShouldBeAbleToExecuteCommands)
@@ -1322,9 +1413,6 @@ func InitializeAggregateScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the client should have aggregate, query, and speculative sub-clients$`, c.theClientShouldHaveAggregateQueryAndSpeculativeSubclients)
 	// NOTE: "the EventBook metadata should be stripped$" is registered by QueryBuilderContext
 	// NOTE: "the EventBook should include the snapshot" is registered by QueryClientContext
-	ctx.Step(`^the events should have correct sequences$`, c.theEventsShouldHaveCorrectSequences)
-	ctx.Step(`^the projection result should be returned$`, c.theProjectionResultShouldBeReturned)
-	ctx.Step(`^the raw bytes should be deserialized$`, c.theRawBytesShouldBeDeserialized)
 	ctx.Step(`^the rejection is received$`, c.theRejectionIsReceived)
 	ctx.Step(`^if type doesn\'t match, None is returned$`, c.ifTypeDoesntMatchNoneIsReturned)
 	ctx.Step(`^if type matches, Some\(T\) is returned$`, c.ifTypeMatchesSomeTIsReturned)
