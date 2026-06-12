@@ -328,7 +328,7 @@ func (c *ConnectionContext) bothClientsShouldShareTheConnection() error {
 }
 
 func (c *ConnectionContext) bothShouldShareTheSameConnection() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (c *ConnectionContext) idleConnectionsShouldRemainOpen() error {

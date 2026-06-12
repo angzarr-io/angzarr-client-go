@@ -165,7 +165,7 @@ func InitErrorHandlingSteps(ctx *godog.ScenarioContext) {
 
 // Original implementations
 func (e *ErrorContext) givenClientImpl() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) givenResponseWithStatus(code string) error {
@@ -380,11 +380,11 @@ func (e *ErrorContext) anInvalidArgumentError() error {
 }
 
 func (e *ErrorContext) differentErrorTypes() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) variousErrorTypes() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) anErrorWithRetryafterMetadata() error {
@@ -474,11 +474,11 @@ func (e *ErrorContext) iCallMessageOnTheError() error {
 }
 
 func (e *ErrorContext) iCallCodeOnTheError() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) iCallStatusOnTheError() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) iConvertTheErrorToString() error {
@@ -496,7 +496,7 @@ func (e *ErrorContext) iDebugformatTheError() error {
 }
 
 func (e *ErrorContext) iInspectTheErrorDetails() error {
-	return nil
+	return godog.ErrPending
 }
 
 // Then steps - error type assertions
@@ -628,19 +628,19 @@ func (e *ErrorContext) theErrorMessageShouldIndicateTheFormatProblem() error {
 }
 
 func (e *ErrorContext) theErrorIndicatesOptimisticLockFailure() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) theErrorMessageShouldDescribeAccessDenial() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) theErrorShouldIndicateServerSideFailure() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) theUnderlyingStatusShouldBeAccessible() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) iShouldGetANonEmptyString() error {
@@ -651,7 +651,7 @@ func (e *ErrorContext) iShouldGetANonEmptyString() error {
 }
 
 func (e *ErrorContext) theMessageShouldDescribeTheError() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) iShouldGetSomeNOT_FOUND() error {
@@ -676,79 +676,79 @@ func (e *ErrorContext) iShouldGetTheFullGRPCStatus() error {
 }
 
 func (e *ErrorContext) iCanAccessTheStatusCodeMessageAndDetails() error {
-	return nil
+	return godog.ErrPending
 }
 
 // Predicate assertions
 
 func (e *ErrorContext) nOT_FOUNDGRPCErrorShouldHaveIs_not_foundTrue() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) connectionErrorShouldHaveIs_not_foundFalse() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) iNTERNALGRPCErrorShouldHaveIs_not_foundFalse() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) fAILED_PRECONDITIONGRPCErrorShouldHaveIs_precondition_failedTrue() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) nOT_FOUNDGRPCErrorShouldHaveIs_precondition_failedFalse() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) connectionErrorShouldHaveIs_precondition_failedFalse() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) iNVALID_ARGUMENTGRPCErrorShouldHaveIs_invalid_argumentTrue() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) clientErrorInvalidArgumentShouldHaveIs_invalid_argumentTrue() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) nOT_FOUNDGRPCErrorShouldHaveIs_invalid_argumentFalse() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) connectionErrorShouldHaveIs_connection_errorTrue() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) transportErrorShouldHaveIs_connection_errorTrue() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) gRPCErrorShouldHaveIs_connection_errorFalse() error {
-	return nil
+	return godog.ErrPending
 }
 
 // Retry logic assertions
 
 func (e *ErrorContext) connectionErrorsShouldBeRetryable() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) uNAVAILABLEGRPCErrorsShouldBeRetryable() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) rESOURCE_EXHAUSTEDShouldBeRetryableWithBackoff() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) iNVALID_ARGUMENTShouldNOTBeRetryable() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) fAILED_PRECONDITIONShouldBeRetryableAfterStateRefresh() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) iShouldBeAbleToExtractRetryTimingHints() error {
@@ -768,11 +768,11 @@ func (e *ErrorContext) iShouldGetAFormattedErrorMessage() error {
 }
 
 func (e *ErrorContext) theMessageShouldIncludeTheErrorTypeAndDescription() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) iShouldGetDetailedDiagnosticInformation() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (e *ErrorContext) theErrorShouldIndicateConnectionLost() error {

@@ -119,7 +119,7 @@ func InitMergeStrategySteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the aggregate handler is invoked$`, mc.thenAggregateHandlerInvoked)
 	ctx.Step(`^the aggregate receives the prior EventBook$`, mc.thenAggregateReceivesPriorEventBook)
 	ctx.Step(`^events are persisted at the correct sequence$`, mc.thenEventsPersistedCorrectSequence)
-	ctx.Step(`^the command fails with aggregate's error$`, mc.thenCommandFailsWithAggregateError)
+	ctx.Step(`^the command fails with the aggregate's rejection reason$`, mc.thenCommandFailsWithAggregateError)
 	ctx.Step(`^both commands succeed$`, mc.thenBothSucceed)
 	ctx.Step(`^the final counter value is (\d+)$`, mc.thenFinalCounterValue)
 	ctx.Step(`^no sequence conflicts occur$`, mc.thenNoSequenceConflicts)

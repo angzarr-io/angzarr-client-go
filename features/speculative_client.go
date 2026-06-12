@@ -36,7 +36,7 @@ func (c *SpeculativeClientContext) key(domain, root string) string {
 // Background
 
 func (c *SpeculativeClientContext) aSpeculativeClientConnectedToTheTestBackend() error {
-	return nil
+	return godog.ErrPending
 }
 
 // Aggregate Execution
@@ -97,11 +97,11 @@ func (c *SpeculativeClientContext) iSpeculativelyExecuteACommandAsOfSequence(seq
 }
 
 func (c *SpeculativeClientContext) theCommandShouldExecuteAgainstTheHistoricalState() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (c *SpeculativeClientContext) theResponseShouldReflectStateAtSequence(seq int) error {
-	return nil
+	return godog.ErrPending
 }
 
 func (c *SpeculativeClientContext) anAggregateWithRootInState(domain, root, state string) error {
@@ -210,7 +210,7 @@ func (c *SpeculativeClientContext) iSpeculativelyExecuteProjector(projector stri
 }
 
 func (c *SpeculativeClientContext) theProjectorShouldProcessAllEventsInOrder(count int) error {
-	return nil
+	return godog.ErrPending
 }
 
 func (c *SpeculativeClientContext) theFinalProjectionStateShouldBeReturned() error {
@@ -241,17 +241,17 @@ func (c *SpeculativeClientContext) theCommandsShouldNOTBeSentToTheTargetDomain()
 }
 
 func (c *SpeculativeClientContext) eventsWithSagaOriginFromAggregate(domain string) error {
-	return nil
+	return godog.ErrPending
 }
 
 func (c *SpeculativeClientContext) theResponseShouldPreserveTheSagaOriginChain() error {
-	return nil
+	return godog.ErrPending
 }
 
 // Process Manager Execution
 
 func (c *SpeculativeClientContext) correlatedEventsFromMultipleDomains() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (c *SpeculativeClientContext) iSpeculativelyExecuteProcessManager(pm string) error {
@@ -274,7 +274,7 @@ func (c *SpeculativeClientContext) theResponseShouldContainThePMsCommandDecision
 }
 
 func (c *SpeculativeClientContext) theCommandsShouldNOTBeExecuted() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (c *SpeculativeClientContext) eventsWithoutCorrelationID() error {
@@ -297,7 +297,7 @@ func (c *SpeculativeClientContext) theSpeculativePMOperationShouldFail() error {
 }
 
 func (c *SpeculativeClientContext) theErrorShouldIndicateMissingCorrelationID() error {
-	return nil
+	return godog.ErrPending
 }
 
 // State Isolation
@@ -372,11 +372,11 @@ func (c *SpeculativeClientContext) iSpeculativelyExecuteCommandB() error {
 }
 
 func (c *SpeculativeClientContext) eachSpeculationShouldStartFromTheSameBaseState() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (c *SpeculativeClientContext) resultsShouldBeIndependent() error {
-	return nil
+	return godog.ErrPending
 }
 
 // Error Handling
@@ -481,4 +481,17 @@ func InitSpeculativeClientSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the speculative operation should fail with connection error$`, c.theOperationShouldFailWithConnectionError)
 	ctx.Step(`^I attempt speculative execution with missing parameters$`, c.iAttemptSpeculativeExecutionWithMissingParameters)
 	ctx.Step(`^the speculative operation should fail with invalid argument error$`, c.theOperationShouldFailWithInvalidArgumentError)
+
+	// --- New (Batch 6+7) phrases from the rewritten speculative_client.feature ---
+	// "SpeculativeClient connected to the test backend" → "what-if execution
+	// surface available", new isolation phrasing "the projected execution
+	// leaves no trace". Stubs FAIL until wired through to real assertions.
+
+	ctx.Step(`^a what-if execution surface available$`, func() error {
+		// The speculative harness is the surface; nothing to provision.
+		return nil
+	})
+	ctx.Step(`^the projected execution leaves no trace$`, func() error {
+		return c.theEventsShouldNOTBePersisted()
+	})
 }

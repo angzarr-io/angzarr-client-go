@@ -1,5 +1,14 @@
 package features
 
+// router.go — step bindings for client/router.feature, driven through the
+// REAL engine dispatch tables (AggregateDispatch, SagaDispatch,
+// ProjectorDispatch, ProcessManagerDispatch, Rebuilder). No simulated
+// dispatch: every Then observes the output of an actual Dispatch/Rebuild.
+//
+// Error assertions use coded ClientErrors. The guard/validate strings
+// asserted in the G/V/C scenarios are harness-authored fixture text (the
+// scenario defines them), not SDK messages.
+
 import (
 	"fmt"
 	"strings"
@@ -13,10 +22,6 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// routerScenarioCtx drives the REAL client routers (CommandRouter,
-// EventRouter, SagaRouter, ProcessManagerRouter, ProjectorRouter,
-// StateRouter). No simulated dispatch: every Then observes the output of an
-// actual Dispatch/WithEvents call.
 type routerScenarioCtx struct {
 	// shared observation surface
 	invoked  map[string]int
@@ -24,15 +29,15 @@ type routerScenarioCtx struct {
 	lastErr  error
 
 	// aggregate
-	cmdRouter     *angzarr.CommandRouter[routerOrderState]
+	rebuilder     *angzarr.Rebuilder[*routerOrderState]
+	aggTable      *angzarr.AggregateDispatch[*routerOrderState]
 	priorEvents   *pb.EventBook
 	stateCaptured bool
 	capturedState routerOrderState
 	capturedSeq   uint32
 
 	// saga
-	eventRouter   *angzarr.EventRouter
-	sagaRouter    *angzarr.SagaRouter
+	sagaTable     *angzarr.SagaDispatch
 	sagaCommands  []*pb.CommandBook
 	sagaResp      *pb.SagaResponse
 	rejectionBook *pb.EventBook
@@ -42,26 +47,25 @@ type routerScenarioCtx struct {
 	destDomain    string
 
 	// projector
-	projRouter *angzarr.ProjectorRouter
+	projTable  *angzarr.ProjectorDispatch[*routerProjAccum]
 	projOrder  []uint32
 	projCount  int
 	projection *pb.Projection
 
 	// process manager
-	pmRouter *angzarr.ProcessManagerRouter[routerPMState]
+	pmTable *angzarr.ProcessManagerDispatch[*routerPMState]
 
 	// state building
-	stateRouter *angzarr.StateRouter[routerOrderState]
-	statePages  []*pb.EventPage
-	builtState  routerOrderState
-	stateBuilt  bool
+	statePages []*pb.EventPage
+	builtState routerOrderState
+	stateBuilt bool
 
 	// typed decode
 	typedReceived *pb.Snapshot
 }
 
-// routerOrderState is rebuilt by a real StateRouter from real proto payloads.
-// pb.Cover stands in for "OrderCreated", pb.Snapshot for "ItemAdded".
+// routerOrderState is rebuilt by the real engine Rebuilder from real proto
+// payloads. pb.Cover stands in for "OrderCreated", pb.Snapshot for "ItemAdded".
 type routerOrderState struct {
 	exists  bool
 	items   int
@@ -70,6 +74,9 @@ type routerOrderState struct {
 
 type routerPMState struct{}
 
+// routerProjAccum is the per-delivery projector instance.
+type routerProjAccum struct{}
+
 func newRouterScenarioCtx() *routerScenarioCtx {
 	return &routerScenarioCtx{
 		invoked:    map[string]int{},
@@ -77,15 +84,23 @@ func newRouterScenarioCtx() *routerScenarioCtx {
 	}
 }
 
-func (c *routerScenarioCtx) newStateRouter() *angzarr.StateRouter[routerOrderState] {
-	return angzarr.NewStateRouter(func() routerOrderState { return routerOrderState{} }).
-		On(func(s *routerOrderState, _ *pb.Cover) { // "OrderCreated"
+func (c *routerScenarioCtx) newRebuilder() *angzarr.Rebuilder[*routerOrderState] {
+	return angzarr.NewRebuilder(func() *routerOrderState { return &routerOrderState{} }).
+		Apply(routerProtoFullName(&pb.Cover{}), func(s *routerOrderState, payload *anypb.Any) error { // "OrderCreated"
+			if err := proto.Unmarshal(payload.Value, &pb.Cover{}); err != nil {
+				return err
+			}
 			s.exists = true
 			s.applied++
+			return nil
 		}).
-		On(func(s *routerOrderState, _ *pb.Snapshot) { // "ItemAdded"
+		Apply(routerProtoFullName(&pb.Snapshot{}), func(s *routerOrderState, payload *anypb.Any) error { // "ItemAdded"
+			if err := proto.Unmarshal(payload.Value, &pb.Snapshot{}); err != nil {
+				return err
+			}
 			s.items++
 			s.applied++
+			return nil
 		})
 }
 
@@ -142,27 +157,27 @@ func routerProtoFullName(m proto.Message) string {
 	return string(m.ProtoReflect().Descriptor().FullName())
 }
 
-// recordingHandler returns a real CommandHandler that records its invocation
-// and emits `emit` events continuing from the supplied next sequence.
-func (c *routerScenarioCtx) recordingHandler(name string, emit int) angzarr.CommandHandler[routerOrderState] {
-	return func(cb *pb.CommandBook, cmd *anypb.Any, state routerOrderState, seq uint32) (*pb.EventBook, error) {
+// recordingThunk records its invocation and emits `emit` headerless events
+// (the engine's fill-only stamping assigns their sequences).
+func (c *routerScenarioCtx) recordingThunk(name string, emit int) angzarr.AggregateCommandThunk[*routerOrderState] {
+	return func(cmd *anypb.Any, state *routerOrderState, cctx angzarr.CommandContext) (*pb.EventBook, error) {
 		c.invoked[name]++
-		c.capturedState = state
-		c.capturedSeq = seq
+		c.capturedState = *state
+		c.capturedSeq = cctx.NextSequence
 		c.stateCaptured = true
 		pages := make([]*pb.EventPage, emit)
 		for i := 0; i < emit; i++ {
-			pages[i] = routerEventPage(seq+uint32(i), routerBareAny("test.Event"))
+			pages[i] = &pb.EventPage{Payload: &pb.EventPage_Event{Event: routerBareAny("test.Event")}}
 		}
-		return routerEventBook("orders", pages), nil
+		return &pb.EventBook{Pages: pages}, nil
 	}
 }
 
 func (c *routerScenarioCtx) dispatchCommand(payload *anypb.Any) error {
-	if c.cmdRouter == nil {
-		return fmt.Errorf("no aggregate router configured")
+	if c.aggTable == nil {
+		return fmt.Errorf("no aggregate table configured")
 	}
-	c.lastResp, c.lastErr = c.cmdRouter.Dispatch(&pb.ContextualCommand{
+	c.lastResp, c.lastErr = c.aggTable.Dispatch(&pb.ContextualCommand{
 		Command: routerCommandBook("orders", payload),
 		Events:  c.priorEvents,
 	})
@@ -172,10 +187,10 @@ func (c *routerScenarioCtx) dispatchCommand(payload *anypb.Any) error {
 // --- givens ----------------------------------------------------------------
 
 func (c *routerScenarioCtx) givenAggRouterHandlers(names ...string) error {
-	c.stateRouter = c.newStateRouter()
-	c.cmdRouter = angzarr.NewCommandRouter("orders", c.stateRouter.ToRebuilder())
+	c.rebuilder = c.newRebuilder()
+	c.aggTable = angzarr.NewAggregateDispatch("orders", "orders", c.rebuilder)
 	for _, n := range names {
-		c.cmdRouter.On("test."+n, c.recordingHandler(n, 1))
+		c.aggTable.OnCommand("test."+n, c.recordingThunk(n, 1))
 	}
 	return nil
 }
@@ -189,8 +204,6 @@ func (c *routerScenarioCtx) givenAggRouterOne(h1 string) error {
 }
 
 func (c *routerScenarioCtx) givenAggRouter() error {
-	// Default handler under "CreateOrder"; scenarios that only build state
-	// never dispatch through it.
 	return c.givenAggRouterHandlers("CreateOrder")
 }
 
@@ -211,57 +224,52 @@ func (c *routerScenarioCtx) givenAggregateWithEvents() error {
 }
 
 func (c *routerScenarioCtx) givenSagaRouterTwo(h1, h2 string) error {
-	c.eventRouter = angzarr.NewEventRouter("saga-test").Domain("orders")
+	c.sagaTable = angzarr.NewSagaDispatch("saga-test", "orders", "inventory")
 	for _, n := range []string{h1, h2} {
 		name := n
-		c.eventRouter.On("test."+name, func(source *pb.EventBook, event *anypb.Any, d *angzarr.Destinations) ([]*pb.CommandBook, error) {
+		c.sagaTable.OnEvent("test."+name, func(*anypb.Any, *angzarr.Destinations) ([]*pb.CommandBook, []*pb.EventBook, error) {
 			c.invoked[name]++
-			return nil, nil
+			return nil, nil, nil
 		})
 	}
 	return nil
 }
 
 func (c *routerScenarioCtx) givenSagaRouter() error {
-	c.eventRouter = angzarr.NewEventRouter("saga-test").Domain("orders")
-	c.eventRouter.On("test.OrderCreated", func(source *pb.EventBook, event *anypb.Any, d *angzarr.Destinations) ([]*pb.CommandBook, error) {
+	c.sagaTable = angzarr.NewSagaDispatch("saga-test", "orders", "inventory")
+	c.sagaTable.OnEvent("test.OrderCreated", func(_ *anypb.Any, d *angzarr.Destinations) ([]*pb.CommandBook, []*pb.EventBook, error) {
 		c.execCount++
 		cmd := routerCommandBook(c.destDomain, routerBareAny("test.ReserveStock"))
 		if d.Has(c.destDomain) {
 			if err := d.StampCommand(cmd, c.destDomain); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		c.perDispatch = append(c.perDispatch, 1)
-		return []*pb.CommandBook{cmd}, nil
+		return []*pb.CommandBook{cmd}, nil, nil
 	})
 	return nil
 }
 
-// recordingSagaHandler is a real SagaDomainHandler whose OnRejected records
-// the rejection routing key and returns compensation events.
-type recordingSagaHandler struct{ c *routerScenarioCtx }
-
-func (h *recordingSagaHandler) EventTypes() []string { return []string{"test.OrderCreated"} }
-
-func (h *recordingSagaHandler) Execute(source *pb.EventBook, event *anypb.Any, d *angzarr.Destinations) (*angzarr.SagaHandlerResponse, error) {
-	h.c.execCount++
-	return &angzarr.SagaHandlerResponse{}, nil
-}
-
-func (h *recordingSagaHandler) OnRejected(n *pb.Notification, targetDomain, targetCommand string) (*angzarr.RejectionHandlerResponse, error) {
-	h.c.rejectedSeen = append(h.c.rejectedSeen, targetDomain+"/"+targetCommand)
-	comp, err := anypb.New(&pb.Cover{Domain: "compensated"})
-	if err != nil {
-		return nil, err
-	}
-	return &angzarr.RejectionHandlerResponse{
-		Events: routerEventBook("orders", []*pb.EventPage{routerEventPage(0, comp)}),
-	}, nil
-}
-
 func (c *routerScenarioCtx) givenSagaRouterWithRejectedCommand() error {
-	c.sagaRouter = angzarr.NewSagaRouter("saga-orders-inventory", "orders", "inventory", &recordingSagaHandler{c: c})
+	c.sagaTable = angzarr.NewSagaDispatch("saga-orders-inventory", "orders", "inventory").
+		OnEvent("test.OrderCreated", func(*anypb.Any, *angzarr.Destinations) ([]*pb.CommandBook, []*pb.EventBook, error) {
+			c.execCount++
+			return nil, nil, nil
+		}).
+		OnRejected("test.ReserveStock", func(n *pb.Notification, rejection *pb.RejectionNotification) ([]*pb.EventBook, error) {
+			domain := rejection.GetRejectedCommand().GetCover().GetDomain()
+			cmdType := ""
+			if pages := rejection.GetRejectedCommand().GetPages(); len(pages) > 0 {
+				cmdType = angzarr.TypeNameFromURL(pages[0].GetCommand().GetTypeUrl())
+			}
+			c.rejectedSeen = append(c.rejectedSeen, domain+"/"+cmdType)
+			comp, err := anypb.New(&pb.Cover{Domain: "compensated"})
+			if err != nil {
+				return nil, err
+			}
+			return []*pb.EventBook{routerEventBook("orders", []*pb.EventPage{routerEventPage(0, comp)})}, nil
+		})
 
 	rejection := &pb.RejectionNotification{
 		RejectedCommand: routerCommandBook("inventory", routerBareAny("test.ReserveStock")),
@@ -278,24 +286,20 @@ func (c *routerScenarioCtx) givenSagaRouterWithRejectedCommand() error {
 	return nil
 }
 
-// recordingProjector is a real ProjectorDomainHandler.
-type recordingProjector struct{ c *routerScenarioCtx }
-
-func (p *recordingProjector) EventTypes() []string {
-	return []string{"test.OrderCreated", "test.Event"}
-}
-
-func (p *recordingProjector) Project(events *pb.EventBook) (*pb.Projection, error) {
-	var last uint32
-	for _, page := range events.Pages {
-		if e := page.GetEvent(); e != nil {
-			p.c.invoked[routerFinalToken(e.TypeUrl)]++
-			p.c.projOrder = append(p.c.projOrder, page.Header.GetSequence())
-			p.c.projCount++
-			last = page.Header.GetSequence()
+func (c *routerScenarioCtx) projThunk(name string) angzarr.ProjectorEventThunk[*routerProjAccum] {
+	return func(_ *routerProjAccum, eventAny *anypb.Any) error {
+		c.invoked[routerFinalToken(eventAny.TypeUrl)]++
+		// Order is carried in the payload (Snapshot.Sequence) when the
+		// scenario builds distinguishable events; bare events count only.
+		snap := &pb.Snapshot{}
+		if err := proto.Unmarshal(eventAny.Value, snap); err == nil && len(eventAny.Value) > 0 {
+			c.projOrder = append(c.projOrder, snap.Sequence)
+		} else {
+			c.projOrder = append(c.projOrder, uint32(c.projCount))
 		}
+		c.projCount++
+		return nil
 	}
-	return &pb.Projection{Cover: events.Cover, Projector: "prj-test", Sequence: last}, nil
 }
 
 func (c *routerScenarioCtx) givenProjectorRouterHandlers(string) error {
@@ -303,36 +307,33 @@ func (c *routerScenarioCtx) givenProjectorRouterHandlers(string) error {
 }
 
 func (c *routerScenarioCtx) givenProjectorRouter() error {
-	c.projRouter = angzarr.NewProjectorRouter("prj-test").Domain("orders", &recordingProjector{c: c})
+	c.projTable = angzarr.NewProjectorDispatch("prj-test", func() *routerProjAccum { return &routerProjAccum{} }).
+		ForDomains("orders").
+		OnEvent("test.OrderCreated", c.projThunk("OrderCreated")).
+		OnEvent("test.Event", c.projThunk("Event")).
+		Finish(func(_ *routerProjAccum, events *pb.EventBook) (*pb.Projection, error) {
+			var last uint32
+			for _, page := range events.Pages {
+				if page.GetEvent() != nil {
+					last = page.GetHeader().GetSequence()
+				}
+			}
+			return &pb.Projection{Cover: events.Cover, Projector: "prj-test", Sequence: last}, nil
+		})
 	return nil
-}
-
-// recordingPMHandler is a real ProcessManagerDomainHandler.
-type recordingPMHandler struct{ c *routerScenarioCtx }
-
-func (h *recordingPMHandler) EventTypes() []string {
-	return []string{"test.OrderCreated", "test.InventoryReserved"}
-}
-
-func (h *recordingPMHandler) Prepare(trigger *pb.EventBook, state routerPMState, event *anypb.Any) []*pb.Cover {
-	return nil
-}
-
-func (h *recordingPMHandler) Handle(trigger *pb.EventBook, state routerPMState, event *anypb.Any, d *angzarr.Destinations) (*angzarr.ProcessManagerResponse, error) {
-	h.c.invoked[routerFinalToken(event.TypeUrl)]++
-	return &angzarr.ProcessManagerResponse{}, nil
-}
-
-func (h *recordingPMHandler) OnRejected(n *pb.Notification, state routerPMState, targetDomain, targetCommand string) (*angzarr.RejectionHandlerResponse, error) {
-	return &angzarr.RejectionHandlerResponse{}, nil
 }
 
 func (c *routerScenarioCtx) givenPMRouterHandlers(h1, h2 string) error {
-	handler := &recordingPMHandler{c: c}
-	c.pmRouter = angzarr.NewProcessManagerRouter("pmg-test", "pmflow",
-		func(events *pb.EventBook) routerPMState { return routerPMState{} }).
-		Domain("orders", handler).
-		Domain("inventory", handler)
+	c.pmTable = angzarr.NewProcessManagerDispatch("pmg-test", "pmflow",
+		angzarr.NewRebuilder(func() *routerPMState { return &routerPMState{} }))
+	for _, domain := range []string{"orders", "inventory"} {
+		for _, eventType := range []string{"test.OrderCreated", "test.InventoryReserved"} {
+			c.pmTable.OnEvent(domain, eventType, func(eventAny *anypb.Any, _ *routerPMState, _ *angzarr.Destinations) (*pb.ProcessManagerHandleResponse, error) {
+				c.invoked[routerFinalToken(eventAny.TypeUrl)]++
+				return &pb.ProcessManagerHandleResponse{}, nil
+			})
+		}
+	}
 	return nil
 }
 
@@ -341,24 +342,24 @@ func (c *routerScenarioCtx) givenRouter() error {
 }
 
 func (c *routerScenarioCtx) givenTypedHandlerRouter() error {
-	c.eventRouter = angzarr.NewEventRouter("typed-test").Domain("orders")
-	angzarr.OnEvent[*pb.Snapshot](c.eventRouter, func(source *pb.EventBook, event *anypb.Any, d *angzarr.Destinations) ([]*pb.CommandBook, error) {
-		snap := &pb.Snapshot{}
-		if err := event.UnmarshalTo(snap); err != nil {
-			return nil, err
-		}
-		c.typedReceived = snap
-		return nil, nil
-	})
+	c.sagaTable = angzarr.NewSagaDispatch("typed-test", "orders", "inventory").
+		OnEvent(routerProtoFullName(&pb.Snapshot{}), func(eventAny *anypb.Any, _ *angzarr.Destinations) ([]*pb.CommandBook, []*pb.EventBook, error) {
+			snap := &pb.Snapshot{}
+			if err := eventAny.UnmarshalTo(snap); err != nil {
+				return nil, nil, err
+			}
+			c.typedReceived = snap
+			return nil, nil, nil
+		})
 	return nil
 }
 
-// gvcRouter wires the guard/validate/compute pattern through a real
-// CommandRouter using pb.Snapshot as the command payload type.
+// gvcRouter wires the guard/validate/compute pattern through the real
+// engine table using pb.Snapshot as the command payload type.
 func (c *routerScenarioCtx) gvcRouter() error {
-	c.stateRouter = c.newStateRouter()
-	c.cmdRouter = angzarr.NewCommandRouter("orders", c.stateRouter.ToRebuilder())
-	c.cmdRouter.On(routerProtoFullName(&pb.Snapshot{}), func(cb *pb.CommandBook, cmd *anypb.Any, state routerOrderState, seq uint32) (*pb.EventBook, error) {
+	c.rebuilder = c.newRebuilder()
+	c.aggTable = angzarr.NewAggregateDispatch("orders", "orders", c.rebuilder)
+	c.aggTable.OnCommand(routerProtoFullName(&pb.Snapshot{}), func(cmd *anypb.Any, state *routerOrderState, cctx angzarr.CommandContext) (*pb.EventBook, error) {
 		// guard: preconditions on state
 		if !state.exists {
 			return nil, fmt.Errorf("guard rejected: aggregate does not exist")
@@ -376,7 +377,7 @@ func (c *routerScenarioCtx) gvcRouter() error {
 		if err != nil {
 			return nil, err
 		}
-		return routerEventBook("orders", []*pb.EventPage{routerEventPage(seq, evt)}), nil
+		return &pb.EventBook{Pages: []*pb.EventPage{{Payload: &pb.EventPage_Event{Event: evt}}}}, nil
 	})
 	return nil
 }
@@ -404,20 +405,20 @@ func (c *routerScenarioCtx) whenReceiveCommandForAggregate() error {
 }
 
 func (c *routerScenarioCtx) whenHandlerEmits(n int) error {
-	c.cmdRouter = angzarr.NewCommandRouter("orders", c.newStateRouter().ToRebuilder()).
-		On("test.CreateOrder", c.recordingHandler("CreateOrder", n))
+	c.aggTable = angzarr.NewAggregateDispatch("orders", "orders", c.newRebuilder()).
+		OnCommand("test.CreateOrder", c.recordingThunk("CreateOrder", n))
 	return c.whenReceiveCommand("CreateOrder")
 }
 
 func (c *routerScenarioCtx) whenHandlerReturnsError() error {
-	c.cmdRouter.On("test.FailingCommand", func(cb *pb.CommandBook, cmd *anypb.Any, state routerOrderState, seq uint32) (*pb.EventBook, error) {
+	c.aggTable.OnCommand("test.FailingCommand", func(*anypb.Any, *routerOrderState, angzarr.CommandContext) (*pb.EventBook, error) {
 		return nil, fmt.Errorf("handler failed: simulated business failure")
 	})
 	return c.whenReceiveCommand("FailingCommand")
 }
 
 func (c *routerScenarioCtx) whenHandlerProducesCommand() error {
-	if c.eventRouter == nil {
+	if c.sagaTable == nil {
 		if err := c.givenSagaRouter(); err != nil {
 			return err
 		}
@@ -427,26 +428,32 @@ func (c *routerScenarioCtx) whenHandlerProducesCommand() error {
 
 func (c *routerScenarioCtx) whenReceiveEvent(eventType string) error {
 	book := routerEventBook("orders", []*pb.EventPage{routerEventPage(0, routerBareAny("test."+eventType))})
-	if c.projRouter != nil {
-		c.projection, c.lastErr = c.projRouter.Dispatch(book)
+	if c.projTable != nil {
+		c.projection, c.lastErr = c.projTable.Dispatch(book)
 		return nil
 	}
-	if c.eventRouter == nil {
-		return fmt.Errorf("no event router configured")
+	if c.sagaTable == nil {
+		return fmt.Errorf("no saga table configured")
 	}
-	c.sagaCommands, c.lastErr = c.eventRouter.Dispatch(book, nil)
+	c.sagaResp, c.lastErr = c.sagaTable.Dispatch(book, nil)
+	if c.sagaResp != nil {
+		c.sagaCommands = c.sagaResp.Commands
+	}
 	return nil
 }
 
 func (c *routerScenarioCtx) whenReceiveEventTriggeringCommandTo(domain string) error {
 	c.destDomain = domain
 	book := routerEventBook("orders", []*pb.EventPage{routerEventPage(0, routerBareAny("test.OrderCreated"))})
-	c.sagaCommands, c.lastErr = c.eventRouter.Dispatch(book, map[string]uint32{domain: 7})
+	c.sagaResp, c.lastErr = c.sagaTable.Dispatch(book, map[string]uint32{domain: 7})
+	if c.sagaResp != nil {
+		c.sagaCommands = c.sagaResp.Commands
+	}
 	return c.lastErr
 }
 
 func (c *routerScenarioCtx) whenRouterProcessesRejection() error {
-	c.sagaResp, c.lastErr = c.sagaRouter.Dispatch(c.rejectionBook, nil)
+	c.sagaResp, c.lastErr = c.sagaTable.Dispatch(c.rejectionBook, nil)
 	return c.lastErr
 }
 
@@ -465,22 +472,24 @@ func (c *routerScenarioCtx) whenProcessTwoEventsSameType() error {
 func (c *routerScenarioCtx) whenReceiveEventsInBatch(n int) error {
 	pages := make([]*pb.EventPage, n)
 	for i := 0; i < n; i++ {
-		pages[i] = routerEventPage(uint32(i), routerBareAny("test.Event"))
+		// Distinguishable payloads carry their order for the in-order pin.
+		payload := mustAny(&pb.Snapshot{Sequence: uint32(i)})
+		payload.TypeUrl = angzarr.TypeURLPrefix + "test.Event"
+		pages[i] = routerEventPage(uint32(i), payload)
 	}
-	c.projection, c.lastErr = c.projRouter.Dispatch(routerEventBook("orders", pages))
+	c.projection, c.lastErr = c.projTable.Dispatch(routerEventBook("orders", pages))
 	return c.lastErr
 }
 
 func (c *routerScenarioCtx) whenReceiveEventFromDomain(eventType, domain string) error {
 	book := routerEventBook(domain, []*pb.EventPage{routerEventPage(0, routerBareAny("test."+eventType))})
-	_, c.lastErr = c.pmRouter.Dispatch(book, nil, nil)
+	_, c.lastErr = c.pmTable.Dispatch(book, nil, nil)
 	return c.lastErr
 }
 
 func (c *routerScenarioCtx) whenRegisterThreeHandlers(t1, t2, t3 string) error {
 	for _, n := range []string{t1, t2, t3} {
-		name := n
-		c.cmdRouter.On("test."+name, c.recordingHandler(name, 1))
+		c.aggTable.OnCommand("test."+n, c.recordingThunk(n, 1))
 	}
 	return nil
 }
@@ -491,7 +500,7 @@ func (c *routerScenarioCtx) whenReceiveEventWithThatType() error {
 		return err
 	}
 	book := routerEventBook("orders", []*pb.EventPage{routerEventPage(0, payload)})
-	_, c.lastErr = c.eventRouter.Dispatch(book, nil)
+	_, c.lastErr = c.sagaTable.Dispatch(book, nil)
 	return c.lastErr
 }
 
@@ -517,7 +526,14 @@ func (c *routerScenarioCtx) givenNoEvents() error {
 }
 
 func (c *routerScenarioCtx) whenBuildStateFromEvents() error {
-	c.builtState = c.stateRouter.WithEvents(c.statePages)
+	if c.rebuilder == nil {
+		c.rebuilder = c.newRebuilder()
+	}
+	state, _, err := c.rebuilder.Rebuild(&pb.EventBook{Pages: c.statePages})
+	if err != nil {
+		return err
+	}
+	c.builtState = *state
 	c.stateBuilt = true
 	return nil
 }
@@ -527,8 +543,8 @@ func (c *routerScenarioCtx) whenBuildState() error {
 }
 
 func (c *routerScenarioCtx) whenReceiveInvalidPayload() error {
-	// A Notification-typed Any with garbage bytes forces the router's real
-	// unmarshal path to fail.
+	// A Notification-typed Any with garbage bytes forces the engine's real
+	// rejection-decode path to fail with a coded error.
 	return c.dispatchCommand(&anypb.Any{
 		TypeUrl: angzarr.TypeURLPrefix + routerProtoFullName(&pb.Notification{}),
 		Value:   []byte{0xFF, 0xFF, 0xFF, 0xFF},
@@ -615,8 +631,9 @@ func (c *routerScenarioCtx) thenRouterReturnsError() error {
 }
 
 func (c *routerScenarioCtx) thenErrorUnknownCommand() error {
-	if c.lastErr == nil || !strings.Contains(c.lastErr.Error(), angzarr.ErrMsgUnknownCommand) {
-		return fmt.Errorf("expected unknown-command error, got: %v", c.lastErr)
+	clientErr := angzarr.AsClientError(c.lastErr)
+	if clientErr == nil || clientErr.Code != angzarr.CodeNoHandlerRegistered {
+		return fmt.Errorf("expected coded %s, got: %v", angzarr.CodeNoHandlerRegistered, c.lastErr)
 	}
 	return nil
 }
@@ -784,13 +801,16 @@ func (c *routerScenarioCtx) thenRequestFails() error {
 }
 
 func (c *routerScenarioCtx) thenFailureIdentifiesMalformedPayload() error {
-	if c.lastErr == nil || !strings.Contains(c.lastErr.Error(), "unmarshal") {
-		return fmt.Errorf("expected unmarshal failure identifying the malformed payload, got: %v", c.lastErr)
+	clientErr := angzarr.AsClientError(c.lastErr)
+	if clientErr == nil || clientErr.Code != angzarr.CodeNotificationDecodeFailed {
+		return fmt.Errorf("expected coded %s identifying the malformed payload, got: %v",
+			angzarr.CodeNotificationDecodeFailed, c.lastErr)
 	}
 	return nil
 }
 
 func (c *routerScenarioCtx) thenGuardRejects() error {
+	// Fixture-authored guard text (defined by this harness's gvcRouter).
 	if c.lastErr == nil || !strings.Contains(c.lastErr.Error(), "guard rejected") {
 		return fmt.Errorf("expected guard rejection, got: %v", c.lastErr)
 	}
@@ -830,9 +850,9 @@ func (c *routerScenarioCtx) thenEventsReflectStateChange() error {
 	return nil
 }
 
-// InitRouterSteps registers router step definitions driving the real client
-// routers. Coordinator/bus-side scenarios in router.feature are tagged @wip
-// and intentionally have no bindings here.
+// InitRouterSteps registers router step definitions driving the real engine
+// dispatch tables. Coordinator/bus-side scenarios in router.feature are
+// tagged @wip and intentionally have no bindings here.
 func InitRouterSteps(ctx *godog.ScenarioContext) {
 	c := newRouterScenarioCtx()
 
@@ -909,4 +929,54 @@ func InitRouterSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^rejection reason should describe the issue$`, c.thenRejectionReasonDescribesIssue)
 	ctx.Step(`^compute should produce events$`, c.thenComputeProducesEvents)
 	ctx.Step(`^events should reflect the state change$`, c.thenEventsReflectStateChange)
+
+	// --- @wip scenarios (coordinator/bus-side semantics) ---
+	// The spec marks these @wip for client suites: sequence admission,
+	// correlation-ID admission/stamping, publish fan-out, subscription
+	// matching, snapshot-fed rebuild, and speculative execution live on the
+	// coordinator/bus side of the contract, which an in-process client
+	// harness cannot drive. Registered pending so the suite stays fully
+	// defined and these surface the moment the spec un-wips them.
+	pending := func() error { return godog.ErrPending }
+	for _, phrase := range []string{
+		`^an aggregate at sequence (\d+)$`,
+		`^an aggregate whose recorded history cannot be replayed$`,
+		`^an event of type "([^"]*)" is published$`,
+		`^a PM router$`,
+		`^a process manager invoked with correlation ID "([^"]*)"$`,
+		`^a process manager with (\d+) prior events persisted$`,
+		`^a snapshot at sequence (\d+)$`,
+		`^a subscription to event type "([^"]*)"$`,
+		`^events (\d+), (\d+), (\d+)$`,
+		`^events from sequence (\d+) to (\d+) are delivered again$`,
+		`^events up to sequence (\d+) have been processed$`,
+		`^events whose final dotted token is "([^"]*)" should match$`,
+		`^events whose final dotted token is "([^"]*)" should NOT match$`,
+		`^events with different correlation IDs should have separate state$`,
+		`^I receive a command at sequence (\d+)$`,
+		`^I receive an event without correlation ID$`,
+		`^I receive correlated events with ID "([^"]*)"$`,
+		`^I register handler for type "([^"]*)"$`,
+		`^I speculatively process events$`,
+		`^no external side effects should occur$`,
+		`^no handler should be invoked$`,
+		`^the bus receives exactly (\d+) events$`,
+		`^the command should be rejected with a sequence mismatch$`,
+		`^the command should fail$`,
+		`^the command should have correct saga_origin$`,
+		`^the command should preserve correlation ID$`,
+		`^the coordinator publishes the events$`,
+		`^the (\d+) prior events are NOT re-fired$`,
+		`^the event should be skipped$`,
+		`^the PM handler emits (\d+) new events$`,
+		`^the PM handler returns events with a blank cover correlation ID$`,
+		`^the projection result should be returned$`,
+		`^the projection should not change$`,
+		`^the published cover carries correlation ID "([^"]*)"$`,
+		`^the resulting state should reflect the snapshot with events (\d+) through (\d+) applied$`,
+		`^the subscriber does NOT receive it$`,
+		`^the subscriber receives it$`,
+	} {
+		ctx.Step(phrase, pending)
+	}
 }

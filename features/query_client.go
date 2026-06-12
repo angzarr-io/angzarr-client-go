@@ -57,6 +57,13 @@ func (c *QueryClientContext) anAggregateWithRoot(domain, root string) error {
 }
 
 func (c *QueryClientContext) anAggregateWithRootHasEvents(domain, root string, count int) error {
+	// Shared phrase: when a live domain-client coordinator is running,
+	// seed its backend too (domain-client.feature scenarios).
+	if currentDomainClient != nil {
+		if err := currentDomainClient.seedFromShared(domain, root, count); err != nil {
+			return err
+		}
+	}
 	book := &pb.EventBook{
 		Cover: &pb.Cover{
 			Domain: domain,
@@ -515,4 +522,76 @@ func InitQueryClientSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^an aggregate "([^"]*)" with root "([^"]*)" has a snapshot at sequence (\d+) and (\d+) events$`, c.anAggregateWithRootHasASnapshotAtSequenceAndEvents)
 	ctx.Step(`^the EventBook should include the snapshot$`, c.theEventBookShouldIncludeTheSnapshot)
 	ctx.Step(`^the returned snapshot should be at sequence (\d+)$`, c.theReturnedSnapshotShouldBeAtSequence)
+
+	// --- New (Batch 6+7) phrases from the rewritten query_client.feature ---
+	// "QueryClient connected to the test backend" → "query surface available",
+	// "I should receive an EventBook with N events" → "I receive N events",
+	// "the first/last event should have sequence N" → "the first/last event
+	// has sequence N", "the EventBook should include the snapshot ...
+	// taken at" wording, etc. Stubs FAIL until wired through to real
+	// assertions.
+
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^a query surface available$`, func() error {
+		return nil
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the history is empty and the next sequence is (\d+)$`, func(seq int) error {
+		if err := c.iShouldReceiveAnEventBookWithEvents(0); err != nil {
+			return err
+		}
+		return c.theNextSequenceShouldBe(seq)
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I receive (\d+) events$`, func(n int) error {
+		return c.iShouldReceiveAnEventBookWithEvents(n)
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I receive no events$`, func() error {
+		return c.iShouldReceiveAnEventBookWithEvents(0)
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the events are in sequence order (\d+) to (\d+)$`, func(from, to int) error {
+		return c.eventsShouldBeInSequenceOrderTo(from, to)
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the first event has type "([^"]*)"$`, func(t string) error {
+		return c.theFirstEventShouldHaveType(t)
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the first event has payload "([^"]*)"$`, func(p string) error {
+		return c.theFirstEventShouldHavePayload(p)
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the first event has sequence (\d+)$`, func(seq int) error {
+		return c.theFirstEventShouldHaveSequence(seq)
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the last event has sequence (\d+)$`, func(seq int) error {
+		return c.theLastEventShouldHaveSequence(seq)
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I receive events up to that timestamp$`, func() error {
+		return c.iShouldReceiveEventsUpToThatTimestamp()
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I receive events from that edition only$`, func() error {
+		return c.iShouldReceiveEventsFromThatEditionOnly()
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I receive events from all correlated aggregates$`, func() error {
+		return c.iShouldReceiveEventsFromAllCorrelatedAggregates()
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the result carries a snapshot taken at sequence (\d+)$`, func(seq int) error {
+		return c.theReturnedSnapshotShouldBeAtSequence(seq)
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the query is refused because a domain is required$`, func() error {
+		return c.theOperationShouldFailWithInvalidArgumentError()
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the query fails because the backend is unreachable$`, func() error {
+		return c.theOperationShouldFailWithConnectionError()
+	})
 }

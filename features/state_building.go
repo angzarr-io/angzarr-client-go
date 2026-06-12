@@ -2,10 +2,12 @@ package features
 
 import (
 	"fmt"
+	angzarr "github.com/benjaminabbitt/angzarr/client/go"
 
 	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"github.com/cucumber/godog"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -52,11 +54,11 @@ func InitStateBuildingSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^initial state with field value (\d+)$`, sc.givenInitialStateField)
 	ctx.Step(`^an event that increments field by (\d+)$`, sc.givenIncrementEvent)
 	ctx.Step(`^events that increment by (\d+), (\d+), and (\d+)$`, sc.givenMultipleIncrements)
-	ctx.Step(`^events wrapped in google\.protobuf\.Any$`, sc.givenAnyWrappedEvents)
-	// NOTE: "an event with type_url" and "an event with corrupted payload bytes" are handled by
-	// EventDecodingContext which is registered later (loses to this one), but we keep them here
+	ctx.Step(`^events stored in a type-erased envelope$`, sc.givenAnyWrappedEvents)
+	// NOTE: "an event with corrupted payload bytes" is also handled by
+	// EventDecodingContext which is registered later (loses to this one), but we keep it here
 	// since StateContext methods handle state_building.feature scenarios
-	ctx.Step(`^an event with type_url "([^"]*)"$`, sc.givenEventTypeURL)
+	ctx.Step(`^an event whose envelope identifies type "([^"]*)"$`, sc.givenEventTypeURL)
 	ctx.Step(`^an event with corrupted payload bytes$`, sc.givenCorruptedPayload)
 	ctx.Step(`^an event missing a required field$`, sc.givenMissingField)
 	ctx.Step(`^an EventBook with no events and no snapshot$`, sc.givenEmptyAggregate)
@@ -96,7 +98,7 @@ func InitStateBuildingSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^no error should occur$`, sc.thenNoError)
 	ctx.Step(`^other events should still be applied$`, sc.thenOtherEventsApplied)
 	ctx.Step(`^the field should equal (\d+)$`, sc.thenFieldEquals)
-	ctx.Step(`^the Any wrapper should be unpacked$`, sc.thenAnyUnpacked)
+	ctx.Step(`^the envelope should be unwrapped$`, sc.thenAnyUnpacked)
 	ctx.Step(`^the typed event should be applied$`, sc.thenTypedEventApplied)
 	ctx.Step(`^the ItemAdded handler should be invoked$`, sc.thenItemAddedInvoked)
 	ctx.Step(`^an error should be raised$`, sc.thenErrorRaised)
@@ -113,7 +115,7 @@ func InitStateBuildingSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^only events (\d+), (\d+), (\d+), (\d+) should be applied$`, sc.thenOnlyEventsApplied)
 	ctx.Step(`^only events at seq (\d+) and (\d+) should be applied$`, sc.thenOnlyEventsAtSeqApplied)
 	ctx.Step(`^events at seq (\d+) and (\d+) should NOT be applied$`, sc.thenEventsAtSeqNotApplied)
-	ctx.Step(`^each event should be unpacked from Any$`, sc.thenEachEventUnpackedFromAny)
+	ctx.Step(`^each event should be unwrapped from its envelope$`, sc.thenEachEventUnpackedFromAny)
 	ctx.Step(`^_apply_event should be called for each$`, sc.thenApplyEventCalledForEach)
 	ctx.Step(`^final state should be returned$`, sc.thenFinalStateReturned)
 	ctx.Step(`^the event should be unpacked$`, sc.thenEventUnpacked)
@@ -128,6 +130,52 @@ func InitStateBuildingSteps(ctx *godog.ScenarioContext) {
 	ctx.Step(`^state should be maintained across events$`, sc.stateShouldBeMaintainedAcrossEvents)
 	ctx.Step(`^no state should carry over between events$`, sc.noStateShouldCarryOverBetweenEvents)
 	ctx.Step(`^only apply events (\d+), (\d+), (\d+)$`, sc.onlyApplyEvents)
+
+	// --- coordinator-contract state_building.feature: business-vocabulary stubs ---
+	// New phrases introduced by the coordinator-contract rewrite that do not
+	// yet have a real implementation. Stubs FAIL (per WIP convention) so the
+	// scenarios surface as work-in-progress rather than passing silently.
+
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the error should indicate the missing field$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the event application step should run for each event$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the resulting state should be returned$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^a starting state and a sequence of type-erased events$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^a state and a type-erased event$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^state is built$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the event is applied$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the handler registered for that event type should be invoked$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the produced state should reflect the event$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
+	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^the type identifier should resolve to that handler$`, func() error {
+		return fmt.Errorf("WIP: step needs implementation")
+	})
 }
 
 func (s *StateContext) makeEventBook(domain string, events []*pb.EventPage, snapshot *pb.Snapshot) *pb.EventBook {
@@ -326,40 +374,65 @@ func (s *StateContext) givenExistingState() error {
 }
 
 func (s *StateContext) givenBuildStateFunction() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (s *StateContext) givenApplyEventFunction() error {
-	return nil
+	return godog.ErrPending
+}
+
+// stateRebuilder drives the REAL engine Rebuilder (exact type-URL match,
+// snapshot-covered page skipping, corrupt payload -> PERSISTED_EVENT_CORRUPT)
+// instead of the abandoned suffix-matching mock this harness used to carry.
+func (s *StateContext) stateRebuilder() *angzarr.Rebuilder[*TestState] {
+	decodeCheck := func(payload *anypb.Any) error {
+		// Generated thunks unmarshal to the typed event; the harness's
+		// test.* types have no Go bindings, so decode into a benign
+		// message to exercise the same failure mode.
+		return proto.Unmarshal(payload.Value, &pb.Cover{})
+	}
+	return angzarr.NewRebuilder(func() *TestState { return &TestState{} }).
+		WithSnapshot(func(st *TestState, payload *anypb.Any) error {
+			st.Exists = true
+			return nil
+		}).
+		Apply("test.OrderCreated", func(st *TestState, payload *anypb.Any) error {
+			if err := decodeCheck(payload); err != nil {
+				return err
+			}
+			st.OrderID = uuid.New().String()
+			st.Exists = true
+			return nil
+		}).
+		Apply("test.ItemAdded", func(st *TestState, payload *anypb.Any) error {
+			if err := decodeCheck(payload); err != nil {
+				return err
+			}
+			st.Items = append(st.Items, "item")
+			return nil
+		})
 }
 
 func (s *StateContext) whenBuildState() error {
-	if s.State == nil {
-		s.State = &TestState{}
-	}
 	s.EventsApplied = nil
-
-	startSeq := int32(-1)
-	if s.EventBook != nil && s.EventBook.Snapshot != nil && s.EventBook.Snapshot.Sequence > 0 {
-		startSeq = int32(s.EventBook.Snapshot.Sequence)
-		s.State.Exists = true
+	state, _, err := s.stateRebuilder().Rebuild(s.EventBook)
+	s.Error = err
+	if err != nil {
+		return nil // assertion steps inspect s.Error
 	}
+	s.State = state
 
+	// Applied-page bookkeeping for the sequencing assertions.
 	if s.EventBook != nil {
+		covered := uint32(0)
+		if s.EventBook.Snapshot != nil {
+			covered = s.EventBook.Snapshot.Sequence
+		}
 		for _, page := range s.EventBook.Pages {
-			if int32(page.GetHeader().GetSequence()) <= startSeq {
+			if covered > 0 && page.GetHeader().GetSequence() <= covered {
 				continue
 			}
 			s.EventsApplied = append(s.EventsApplied, page)
-			if event, ok := page.Payload.(*pb.EventPage_Event); ok {
-				typeURL := event.Event.TypeUrl
-				if len(typeURL) > 12 && typeURL[len(typeURL)-12:] == "OrderCreated" {
-					s.State.OrderID = uuid.New().String()
-					s.State.Exists = true
-				} else if len(typeURL) > 9 && typeURL[len(typeURL)-9:] == "ItemAdded" {
-					s.State.Items = append(s.State.Items, "item")
-				}
-			}
 		}
 	}
 	return nil
@@ -392,7 +465,7 @@ func (s *StateContext) whenApplyAllEvents() error {
 }
 
 func (s *StateContext) whenApplySingle() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (s *StateContext) whenAttemptBuild() error {
@@ -412,11 +485,11 @@ func (s *StateContext) whenBuildFromEvents() error {
 }
 
 func (s *StateContext) whenCallBuildState() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (s *StateContext) whenCallApplyEvent() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (s *StateContext) thenStateIsDefault() error {
@@ -516,7 +589,7 @@ func (s *StateContext) thenStateStartsSnapshot() error {
 }
 
 func (s *StateContext) thenUnknownSkipped() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (s *StateContext) thenNoError() error {
@@ -564,14 +637,24 @@ func (s *StateContext) thenTypedEventApplied() error {
 }
 
 func (s *StateContext) thenItemAddedInvoked() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (s *StateContext) thenErrorRaised() error {
+	if s.Error == nil {
+		return fmt.Errorf("expected an error from state rebuild, got none")
+	}
 	return nil
 }
 
 func (s *StateContext) thenDeserializationError() error {
+	clientErr := angzarr.AsClientError(s.Error)
+	if clientErr == nil {
+		return fmt.Errorf("expected a coded ClientError, got %v", s.Error)
+	}
+	if clientErr.Code != angzarr.CodePersistedEventCorrupt {
+		return fmt.Errorf("expected code %s, got %s", angzarr.CodePersistedEventCorrupt, clientErr.Code)
+	}
 	return nil
 }
 
@@ -730,27 +813,27 @@ func (s *StateContext) thenFinalStateReturned() error {
 }
 
 func (s *StateContext) thenEventUnpacked() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (s *StateContext) thenCorrectTypeHandlerInvoked() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (s *StateContext) thenStateMutated() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (s *StateContext) thenTypeURLSuffixMatches() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (s *StateContext) thenBehaviorDependsOnLanguage() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (s *StateContext) thenEitherDefaultOrError() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (s *StateContext) stateBuildingFails() error {

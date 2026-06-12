@@ -1,1419 +1,577 @@
 package features
 
-import (
-	"fmt"
-	"strings"
+// aggregate_client.go — step bindings for client/aggregate_client.feature,
+// driven through the REAL stack end to end:
+//
+//	CommandHandlerClient (real, via CommandHandlerClientFromService)
+//	  → testBackend (in-memory coordinator: sequence checks, persistence,
+//	    sync modes, domain routing)
+//	  → AggregateDispatchHandler (real engine adapter, real error mapping)
+//	  → AggregateDispatch table (real engine) → typed handlers
+//
+// The former MockAggregateRouter/MockEventRouter (substring matching,
+// shadow semantics) are deleted. Error assertions use coded ClientErrors
+// extracted from wire ErrorInfo — never message substrings.
 
+import (
+	"context"
+	"encoding/hex"
+	"fmt"
+	"sync"
+	"time"
+
+	angzarr "github.com/benjaminabbitt/angzarr/client/go"
 	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"github.com/cucumber/godog"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
-	"google.golang.org/protobuf/types/known/emptypb"
 )
 
-// AggregateContext holds test context for aggregate scenarios
-type AggregateContext struct {
-	aggregateRouter     *MockAggregateRouter
-	sagaRouter          *MockEventRouter
-	projectorRouter     *MockEventRouter
-	pmRouter            *MockEventRouter
-	response            *pb.BusinessResponse
-	err                 error
-	invokedHandlers     []string
-	eventBook           *pb.EventBook
-	commandSequence     uint32 // sequence of incoming command for validation
-	lastProjection      interface{}
-	batchEventsReceived int
-	rejectionReason     string
-	producedEvents      []*pb.EventPage
+const (
+	fqCreateOrder = "test.CreateOrder"
+	fqAddItem     = "test.AddItem"
+	fqMultiEvent  = "test.MultiEvent"
+	fqOrderEvent  = "test.OrderCreated"
+	fieldCustomer = "customer"
+	domainUnknown = "unknown domain"
+)
+
+// orderState is the trivial aggregate state behind the test backend.
+type orderState struct{}
+
+// testBackend is an in-memory coordinator implementing
+// pb.CommandHandlerCoordinatorServiceClient: it enforces optimistic
+// concurrency, persists accepted events, propagates correlation IDs, and
+// simulates sync modes. Dispatch and error mapping are the REAL engine
+// adapter's.
+type testBackend struct {
+	mu      sync.Mutex
+	store   map[string]*pb.EventBook
+	domains map[string]bool
+	adapter *angzarr.AggregateDispatchHandler[*orderState]
+
+	unavailable bool
+	slow        bool
+
+	projectorsConfigured bool
+	sagasConfigured      bool
+	projectorRuns        int
+	sagaCompleted        bool
 }
 
-// MockAggregateRouter simulates CommandRouter behavior
-type MockAggregateRouter struct {
-	handlers         map[string]func() *pb.EventBook
-	ctx              *AggregateContext
-	expectedSequence uint32 // expected next sequence from aggregate state
-}
-
-// MockEventRouter simulates EventRouter behavior
-type MockEventRouter struct {
-	domains map[string]map[string]func()
-	ctx     *AggregateContext
-	current string
-}
-
-func NewMockAggregateRouter(ctx *AggregateContext) *MockAggregateRouter {
-	return &MockAggregateRouter{
-		handlers: make(map[string]func() *pb.EventBook),
-		ctx:      ctx,
-	}
-}
-
-func NewMockEventRouter(ctx *AggregateContext) *MockEventRouter {
-	return &MockEventRouter{
-		domains: make(map[string]map[string]func()),
-		ctx:     ctx,
-	}
-}
-
-func (r *MockAggregateRouter) On(suffix string, handler func() *pb.EventBook) *MockAggregateRouter {
-	r.handlers[suffix] = handler
-	return r
-}
-
-func (r *MockAggregateRouter) Dispatch(commandType string) (*pb.BusinessResponse, error) {
-	// Check sequence validation if expectedSequence is set
-	if r.expectedSequence > 0 && r.ctx.commandSequence != r.expectedSequence {
-		return nil, fmt.Errorf("sequence mismatch: expected %d, got %d", r.expectedSequence, r.ctx.commandSequence)
-	}
-
-	for suffix, handler := range r.handlers {
-		if commandType == suffix || contains(commandType, suffix) {
-			r.ctx.invokedHandlers = append(r.ctx.invokedHandlers, suffix)
-			events := handler()
-			return &pb.BusinessResponse{Result: &pb.BusinessResponse_Events{Events: events}}, nil
+func newTestBackend() *testBackend {
+	table := angzarr.NewAggregateDispatch(
+		"orders", "orders",
+		angzarr.NewRebuilder(func() *orderState { return &orderState{} }),
+	)
+	// CreateOrder/AddItem: one OrderCreated-style event; empty data is a
+	// missing required field (coded rejection naming the field).
+	emitOne := func(cmdAny *anypb.Any, _ *orderState, _ angzarr.CommandContext) (*pb.EventBook, error) {
+		carrier := &pb.Projection{}
+		if err := proto.Unmarshal(cmdAny.Value, carrier); err != nil {
+			return nil, angzarr.AnyDecodeError(cmdAny.TypeUrl, err)
 		}
-	}
-	return nil, fmt.Errorf("Unknown command type: %s", commandType)
-}
-
-func (r *MockEventRouter) Domain(name string) *MockEventRouter {
-	r.current = name
-	if r.domains[name] == nil {
-		r.domains[name] = make(map[string]func())
-	}
-	return r
-}
-
-func (r *MockEventRouter) On(suffix string, handler func()) *MockEventRouter {
-	if r.current != "" {
-		r.domains[r.current][suffix] = handler
-	}
-	return r
-}
-
-func (r *MockEventRouter) Dispatch(domain, eventType string) {
-	if domainHandlers, ok := r.domains[domain]; ok {
-		for suffix, handler := range domainHandlers {
-			if eventType == suffix || contains(eventType, suffix) {
-				r.ctx.invokedHandlers = append(r.ctx.invokedHandlers, suffix)
-				handler()
-				return
-			}
+		if carrier.Projector == "" {
+			return nil, angzarr.NewInvalidArgumentRejectionWithCode(
+				angzarr.CodeValueEmpty, "required field missing",
+				map[string]string{"field": fieldCustomer})
 		}
+		return &pb.EventBook{Pages: []*pb.EventPage{
+			{Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: angzarr.TypeURLPrefix + fqOrderEvent}}},
+		}}, nil
+	}
+	table.OnCommand(fqCreateOrder, emitOne).OnCommand(fqAddItem, emitOne)
+	table.OnCommand(fqMultiEvent, func(cmdAny *anypb.Any, _ *orderState, _ angzarr.CommandContext) (*pb.EventBook, error) {
+		carrier := &pb.Projection{}
+		if err := proto.Unmarshal(cmdAny.Value, carrier); err != nil {
+			return nil, angzarr.AnyDecodeError(cmdAny.TypeUrl, err)
+		}
+		book := &pb.EventBook{}
+		for i := uint32(0); i < carrier.Sequence; i++ {
+			book.Pages = append(book.Pages, &pb.EventPage{
+				Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: angzarr.TypeURLPrefix + fqOrderEvent}},
+			})
+		}
+		return book, nil
+	})
+
+	return &testBackend{
+		store:   make(map[string]*pb.EventBook),
+		domains: map[string]bool{"orders": true},
+		adapter: angzarr.NewAggregateDispatchHandler(table),
 	}
 }
 
-func contains(s, substr string) bool {
-	return strings.Contains(s, substr)
+func bookKey(domain string, root []byte) string {
+	return domain + "|" + hex.EncodeToString(root)
 }
 
-// Step definitions
-
-func (c *AggregateContext) anAggregateRouterWithHandlersForAnd(type1, type2 string) error {
-	c.aggregateRouter = NewMockAggregateRouter(c)
-	c.aggregateRouter.On(type1, func() *pb.EventBook {
-		return makeTestEventBook(0)
-	})
-	c.aggregateRouter.On(type2, func() *pb.EventBook {
-		return makeTestEventBook(0)
-	})
-	return nil
-}
-
-func (c *AggregateContext) anAggregateRouterWithHandlersFor(handlerType string) error {
-	c.aggregateRouter = NewMockAggregateRouter(c)
-	c.aggregateRouter.On(handlerType, func() *pb.EventBook {
-		return makeTestEventBook(0)
-	})
-	return nil
-}
-
-func (c *AggregateContext) anAggregateRouter() error {
-	c.aggregateRouter = NewMockAggregateRouter(c)
-	c.aggregateRouter.On("TestCommand", func() *pb.EventBook {
-		return makeTestEventBook(0)
-	})
-	return nil
-}
-
-func (c *AggregateContext) anAggregateWithExistingEvents() error {
-	c.eventBook = &pb.EventBook{
-		Cover: &pb.Cover{Domain: "test"},
+// seed installs prior history for an aggregate.
+func (b *testBackend) seed(domain string, root []byte, seq uint32) {
+	book := &pb.EventBook{
+		Cover:        &pb.Cover{Domain: domain, Root: &pb.UUID{Value: root}},
+		NextSequence: seq,
 	}
-	for i := 0; i < 3; i++ {
-		evt, _ := anypb.New(&emptypb.Empty{})
-		c.eventBook.Pages = append(c.eventBook.Pages, &pb.EventPage{
-			Header:  &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: uint32(i)}},
-			Payload: &pb.EventPage_Event{Event: evt},
+	for i := uint32(0); i < seq; i++ {
+		book.Pages = append(book.Pages, &pb.EventPage{
+			Header:  &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: i}},
+			Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: angzarr.TypeURLPrefix + fqOrderEvent}},
 		})
 	}
-	return nil
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.store[bookKey(domain, root)] = book
 }
 
-func (c *AggregateContext) anAggregateAtSequence(seq int) error {
-	// Set up aggregate router for sequence validation tests
-	c.aggregateRouter = NewMockAggregateRouter(c)
-	c.aggregateRouter.expectedSequence = uint32(seq)
-	c.aggregateRouter.On("TestCommand", func() *pb.EventBook {
-		return makeTestEventBook(0)
-	})
+func (b *testBackend) recorded(domain string, root []byte) *pb.EventBook {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.store[bookKey(domain, root)]
+}
 
-	c.eventBook = &pb.EventBook{
-		Cover:        &pb.Cover{Domain: "test"},
-		NextSequence: uint32(seq),
+// HandleCommand is the coordinator surface: availability, domain routing,
+// optimistic concurrency, dispatch, persistence, sync modes.
+func (b *testBackend) HandleCommand(ctx context.Context, req *pb.CommandRequest, _ ...grpc.CallOption) (*pb.CommandResponse, error) {
+	if b.unavailable {
+		return nil, status.Error(codes.Unavailable, "connection refused")
 	}
-	for i := 0; i < seq; i++ {
-		evt, _ := anypb.New(&emptypb.Empty{})
-		c.eventBook.Pages = append(c.eventBook.Pages, &pb.EventPage{
-			Header:  &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: uint32(i)}},
-			Payload: &pb.EventPage_Event{Event: evt},
-		})
+	if b.slow {
+		<-ctx.Done()
+		return nil, status.FromContextError(ctx.Err()).Err()
 	}
-	return nil
-}
 
-func (c *AggregateContext) iReceiveACommand(commandType string) error {
-	c.response, c.err = c.aggregateRouter.Dispatch(commandType)
-	return nil
-}
+	cmd := req.GetCommand()
+	cover := cmd.GetCover()
+	if !b.domains[cover.GetDomain()] {
+		return nil, status.Error(codes.NotFound, domainUnknown)
+	}
 
-func (c *AggregateContext) iReceiveACommandForThatAggregate() error {
-	c.response, c.err = c.aggregateRouter.Dispatch("TestCommand")
-	return nil
-}
+	b.mu.Lock()
+	key := bookKey(cover.GetDomain(), cover.GetRoot().GetValue())
+	prior := b.store[key]
+	if prior == nil {
+		prior = &pb.EventBook{Cover: cover}
+	}
+	// Optimistic concurrency: the command's stamped sequence must equal
+	// the aggregate's next sequence.
+	cmdSeq := uint32(0)
+	if len(cmd.Pages) > 0 {
+		cmdSeq = cmd.Pages[0].GetHeader().GetSequence()
+	}
+	if cmdSeq != prior.NextSequence {
+		b.mu.Unlock()
+		return nil, status.Error(codes.FailedPrecondition, "sequence mismatch: aggregate has moved on")
+	}
+	b.mu.Unlock()
 
-func (c *AggregateContext) iReceiveACommandAtSequence(seq int) error {
-	c.commandSequence = uint32(seq)
-	c.response, c.err = c.aggregateRouter.Dispatch("TestCommand")
-	return nil
-}
+	// Dispatch through the REAL engine adapter (real error mapping).
+	resp, err := b.adapter.Handle(ctx, &pb.ContextualCommand{Command: cmd, Events: prior})
+	if err != nil {
+		return nil, err
+	}
+	emitted := resp.GetEvents()
+	if emitted == nil {
+		emitted = &pb.EventBook{}
+	}
 
-func (c *AggregateContext) theHandlerShouldBeInvoked(handlerName string) error {
-	for _, h := range c.invokedHandlers {
-		if h == handlerName {
-			return nil
+	// Persist atomically: stamp consecutive sequences, propagate the
+	// command's correlation ID onto the recorded book.
+	b.mu.Lock()
+	next := prior.NextSequence
+	for _, page := range emitted.Pages {
+		page.Header = &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: next}}
+		next++
+	}
+	stored := b.store[key]
+	if stored == nil {
+		stored = &pb.EventBook{Cover: &pb.Cover{
+			Domain:        cover.GetDomain(),
+			Root:          cover.GetRoot(),
+			CorrelationId: cover.GetCorrelationId(),
+		}}
+	} else if cover.GetCorrelationId() != "" {
+		stored.Cover.CorrelationId = cover.GetCorrelationId()
+	}
+	stored.Pages = append(stored.Pages, emitted.Pages...)
+	stored.NextSequence = next
+	b.store[key] = stored
+	b.mu.Unlock()
+
+	out := &pb.CommandResponse{Events: &pb.EventBook{
+		Cover:        stored.Cover,
+		Pages:        emitted.Pages,
+		NextSequence: next,
+	}}
+
+	// Sync modes: ASYNC returns immediately; SIMPLE waits for projectors
+	// (results included); CASCADE additionally completes the saga chain.
+	switch req.GetSyncMode() {
+	case pb.SyncMode_SYNC_MODE_SIMPLE:
+		if b.projectorsConfigured {
+			b.projectorRuns++
+			out.Projections = []*pb.Projection{{Projector: "test-projector"}}
+		}
+	case pb.SyncMode_SYNC_MODE_CASCADE:
+		if b.projectorsConfigured {
+			b.projectorRuns++
+			out.Projections = []*pb.Projection{{Projector: "test-projector"}}
+		}
+		if b.sagasConfigured {
+			b.sagaCompleted = true
 		}
 	}
-	return fmt.Errorf("handler %s was not invoked", handlerName)
+	return out, nil
 }
 
-func (c *AggregateContext) theHandlerShouldNOTBeInvoked(handlerName string) error {
-	for _, h := range c.invokedHandlers {
-		if h == handlerName {
-			return fmt.Errorf("handler %s was invoked but should not have been", handlerName)
-		}
-	}
-	return nil
+func (b *testBackend) HandleEvent(ctx context.Context, in *pb.EventRequest, _ ...grpc.CallOption) (*pb.FactInjectionResponse, error) {
+	return &pb.FactInjectionResponse{}, nil
 }
 
-func (c *AggregateContext) theRouterShouldLoadTheEventBookFirst() error {
-	if c.response == nil && c.err == nil {
-		return fmt.Errorf("expected response or error")
-	}
-	return nil
+func (b *testBackend) HandleSyncSpeculative(ctx context.Context, in *pb.SpeculateCommandHandlerRequest, _ ...grpc.CallOption) (*pb.CommandResponse, error) {
+	return &pb.CommandResponse{}, nil
 }
 
-func (c *AggregateContext) theHandlerShouldReceiveTheReconstructedState() error {
-	if len(c.invokedHandlers) == 0 {
-		return fmt.Errorf("no handlers were invoked")
-	}
-	return nil
+func (b *testBackend) HandleCompensation(ctx context.Context, in *pb.CommandRequest, _ ...grpc.CallOption) (*pb.BusinessResponse, error) {
+	return &pb.BusinessResponse{}, nil
 }
 
-func (c *AggregateContext) theRouterShouldReturnAnError() error {
-	if c.err == nil {
-		return fmt.Errorf("expected an error but got none")
-	}
-	return nil
-}
-
-func (c *AggregateContext) theErrorShouldIndicateUnknownCommandType() error {
-	if c.err == nil {
-		return fmt.Errorf("expected an error")
-	}
-	if !contains(c.err.Error(), "Unknown command type") {
-		return fmt.Errorf("expected error to indicate unknown command type, got: %s", c.err.Error())
-	}
-	return nil
-}
-
-func (c *AggregateContext) noHandlerShouldBeInvoked() error {
-	if c.err != nil {
-		return nil // Error means handler wasn't invoked
-	}
-	if len(c.invokedHandlers) > 0 {
-		return fmt.Errorf("handlers were invoked: %v", c.invokedHandlers)
-	}
-	return nil
-}
-
-// Saga Router steps
-
-func (c *AggregateContext) aSagaRouterWithHandlersForAnd(type1, type2 string) error {
-	c.sagaRouter = NewMockEventRouter(c)
-	c.sagaRouter.Domain("orders").On(type1, func() {}).On(type2, func() {})
-	return nil
-}
-
-func (c *AggregateContext) aSagaRouter() error {
-	c.sagaRouter = NewMockEventRouter(c)
-	c.sagaRouter.Domain("orders").On("OrderCreated", func() {})
-	return nil
-}
-
-func (c *AggregateContext) iReceiveAnEvent(eventType string) error {
-	// Dispatch to whichever router is set up (saga, projector, or PM)
-	if c.sagaRouter != nil {
-		c.sagaRouter.Dispatch("orders", eventType)
-	} else if c.projectorRouter != nil {
-		c.projectorRouter.Dispatch("orders", eventType)
-	} else if c.pmRouter != nil {
-		c.pmRouter.Dispatch("orders", eventType)
-	}
-	return nil
-}
-
-// PM Router steps
-
-func (c *AggregateContext) aPMRouterWithHandlersForAnd(type1, type2 string) error {
-	c.pmRouter = NewMockEventRouter(c)
-	c.pmRouter.Domain("orders").On(type1, func() {})
-	c.pmRouter.Domain("inventory").On(type2, func() {})
-	return nil
-}
-
-func (c *AggregateContext) aPMRouter() error {
-	return c.aPMRouterWithHandlersForAnd("OrderCreated", "InventoryReserved")
-}
-
-func (c *AggregateContext) iReceiveAnEventFromDomain(eventType, domain string) error {
-	c.pmRouter.Dispatch(domain, eventType)
-	return nil
-}
-
-func (c *AggregateContext) iReceiveAnEventWithoutCorrelationID() error {
-	// Event without correlation ID should be skipped
-	return nil
-}
-
-func (c *AggregateContext) theEventShouldBeSkipped() error {
-	if len(c.invokedHandlers) > 0 {
-		return fmt.Errorf("expected no handlers to be invoked")
-	}
-	return nil
-}
-
-// Projector Router steps
-
-func (c *AggregateContext) aProjectorRouterWithHandlersFor(eventType string) error {
-	c.projectorRouter = NewMockEventRouter(c)
-	c.projectorRouter.Domain("orders").On(eventType, func() {})
-	return nil
-}
-
-func (c *AggregateContext) aProjectorRouter() error {
-	return c.aProjectorRouterWithHandlersFor("TestEvent")
-}
-
-// Handler Registration steps
-
-func (c *AggregateContext) aRouter() error {
-	c.sagaRouter = NewMockEventRouter(c)
-	return nil
-}
-
-func (c *AggregateContext) iRegisterHandlerForType(eventType string) error {
-	c.sagaRouter.Domain("test").On(eventType, func() {})
-	return nil
-}
-
-func (c *AggregateContext) iRegisterHandlersForAndAnd(type1, type2, type3 string) error {
-	c.sagaRouter.Domain("test").On(type1, func() {}).On(type2, func() {}).On(type3, func() {})
-	return nil
-}
-
-func (c *AggregateContext) eventsEndingWithShouldMatch(suffix string) error {
-	// Verify handler is registered
-	if c.sagaRouter.domains["test"] == nil {
-		return fmt.Errorf("no handlers registered for test domain")
-	}
-	if _, ok := c.sagaRouter.domains["test"][suffix]; !ok {
-		return fmt.Errorf("handler for %s not found", suffix)
-	}
-	return nil
-}
-
-func (c *AggregateContext) eventsEndingWithShouldNOTMatch(suffix string) error {
-	if c.sagaRouter.domains["test"] != nil {
-		if _, ok := c.sagaRouter.domains["test"][suffix]; ok {
-			return fmt.Errorf("handler for %s should not exist", suffix)
-		}
-	}
-	return nil
-}
-
-func (c *AggregateContext) allThreeTypesShouldBeRoutable() error {
-	if len(c.sagaRouter.domains["test"]) != 3 {
-		return fmt.Errorf("expected 3 handlers, got %d", len(c.sagaRouter.domains["test"]))
-	}
-	return nil
-}
-
-func (c *AggregateContext) eachShouldInvokeItsSpecificHandler() error {
-	return nil // Verified by registration
-}
-
-// Client capability step implementations
-
-func (c *AggregateContext) iShouldReceiveNoEvents() error {
-	if c.eventBook != nil && len(c.eventBook.Pages) > 0 {
-		return fmt.Errorf("expected no events, got %d", len(c.eventBook.Pages))
-	}
-	return nil
-}
-
-func (c *AggregateContext) iSpeculativelyProcessEvents() error {
-	// Speculative processing doesn't persist
-	return nil
-}
-
-func (c *AggregateContext) noEventShouldBeEmitted() error {
-	if c.response != nil {
-		if result, ok := c.response.Result.(*pb.BusinessResponse_Events); ok {
-			if result.Events != nil && len(result.Events.Pages) > 0 {
-				return fmt.Errorf("expected no events emitted")
-			}
-		}
-	}
-	return nil
-}
-
-func (c *AggregateContext) noEventsForTheAggregate() error {
-	if c.eventBook != nil {
-		c.eventBook.Pages = nil
-	}
-	return nil
-}
-
-func (c *AggregateContext) noEventsShouldBeEmitted() error {
-	return c.noEventShouldBeEmitted()
-}
-
-func (c *AggregateContext) noExternalSideEffectsShouldOccur() error {
-	// Speculative processing has no external side effects
-	return nil
-}
-
-func (c *AggregateContext) onlyTheEventPagesShouldBeReturned() error {
-	if c.eventBook == nil || len(c.eventBook.Pages) == 0 {
-		return fmt.Errorf("expected event pages")
-	}
-	return nil
-}
-
-func (c *AggregateContext) onlyTheVEventShouldMatch(version int) error {
-	// Type URL version matching
-	return nil
-}
-
-func (c *AggregateContext) theClientShouldBeAbleToExecuteCommands() error {
-	// Client capability verification
-	return nil
-}
-
-func (c *AggregateContext) theClientShouldBeAbleToPerformSpeculativeOperations() error {
-	// Client capability verification
-	return nil
-}
-
-func (c *AggregateContext) theClientShouldBeAbleToQueryEvents() error {
-	// Client capability verification
-	return nil
-}
-
-func (c *AggregateContext) theClientShouldHaveAggregateAndQuerySubclients() error {
-	// DomainClient structure verification
-	return nil
-}
-
-func (c *AggregateContext) theClientShouldHaveAggregateQueryAndSpeculativeSubclients() error {
-	// Client structure verification
-	return nil
-}
-
-func (c *AggregateContext) theEventBookMetadataShouldBeStripped() error {
-	// Metadata stripping for speculative results
-	return nil
-}
-
-func (c *AggregateContext) theEventBookShouldIncludeTheSnapshot() error {
-	if c.eventBook == nil || c.eventBook.Snapshot == nil {
-		return fmt.Errorf("expected snapshot in EventBook")
-	}
-	return nil
-}
-
-func (c *AggregateContext) theEventsShouldHaveCorrectSequences() error {
-	if c.eventBook == nil {
-		return nil
-	}
-	for i, page := range c.eventBook.Pages {
-		if page.GetHeader().GetSequence() != uint32(i) {
-			return fmt.Errorf("expected sequence %d, got %d", i, page.GetHeader().GetSequence())
-		}
-	}
-	return nil
-}
-
-func (c *AggregateContext) theProjectionResultShouldBeReturned() error {
-	// Speculative projection result verification
-	return nil
-}
-
-func (c *AggregateContext) theRawBytesShouldBeDeserialized() error {
-	// Deserialization verification
-	return nil
-}
-
-func (c *AggregateContext) theRejectionIsReceived() error {
-	if c.response != nil {
-		if _, ok := c.response.Result.(*pb.BusinessResponse_Revocation); ok {
-			return nil
-		}
-	}
-	return fmt.Errorf("expected rejection")
-}
-
-func (c *AggregateContext) ifTypeDoesntMatchNoneIsReturned() error {
-	// Type matching returns None when type doesn't match
-	return nil
-}
-
-func (c *AggregateContext) ifTypeMatchesSomeTIsReturned() error {
-	// Type matching returns Some(T) when type matches
-	return nil
-}
-
-// Router batch processing steps
-func (c *AggregateContext) iReceiveEventsInABatch(count int) error {
-	c.batchEventsReceived = count
-	// Simulate projection processing
-	c.lastProjection = map[string]interface{}{"processed": count}
-	c.invokedHandlers = append(c.invokedHandlers, "batch")
-	return nil
-}
-
-func (c *AggregateContext) theFinalProjectionStateShouldBeReturned() error {
-	if c.lastProjection == nil {
-		return fmt.Errorf("expected final projection state")
-	}
-	return nil
-}
-
-func (c *AggregateContext) allEventsShouldBeProcessedInOrderAgg(count int) error {
-	if c.batchEventsReceived != count {
-		return fmt.Errorf("expected %d events processed, got %d", count, c.batchEventsReceived)
-	}
-	return nil
-}
-
-func (c *AggregateContext) aSagaCommandThatWasRejected() error {
-	// Set up a rejection response
-	c.response = &pb.BusinessResponse{
-		Result: &pb.BusinessResponse_Revocation{
-			Revocation: &pb.RevocationResponse{Reason: "command rejected"},
-		},
-	}
-	return nil
-}
-
-func (c *AggregateContext) aSagaRouterWithARejectedCommand() error {
-	c.sagaRouter = NewMockEventRouter(c)
-	c.response = &pb.BusinessResponse{
-		Result: &pb.BusinessResponse_Revocation{
-			Revocation: &pb.RevocationResponse{Reason: "command rejected"},
-		},
-	}
-	return nil
-}
-
-func (c *AggregateContext) theRouterProcessesTheRejection() error {
-	// The rejection is already set up in the response
-	if c.response == nil {
-		return fmt.Errorf("no rejection to process")
-	}
-	if _, ok := c.response.Result.(*pb.BusinessResponse_Revocation); !ok {
-		return fmt.Errorf("response is not a rejection")
-	}
-	return nil
-}
-
-func (c *AggregateContext) stateBuildingFails() error {
-	c.err = fmt.Errorf("state building failed")
-	return nil
-}
-
-func (c *AggregateContext) validateShouldReject() error {
-	c.rejectionReason = "validation failed"
-	return nil
-}
-
-func (c *AggregateContext) rejectionReasonShouldDescribeTheIssue() error {
-	if c.rejectionReason == "" {
-		return fmt.Errorf("expected rejection reason")
-	}
-	return nil
-}
-
-func (c *AggregateContext) computeShouldProduceEvents() error {
-	if len(c.producedEvents) == 0 {
-		evt, _ := anypb.New(&emptypb.Empty{})
-		c.producedEvents = []*pb.EventPage{
-			{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: 0}}, Payload: &pb.EventPage_Event{Event: evt}},
-		}
-	}
-	if len(c.producedEvents) == 0 {
-		return fmt.Errorf("expected events")
-	}
-	return nil
-}
-
-func (c *AggregateContext) iReceiveAnEventWithInvalidPayload() error {
-	c.err = fmt.Errorf("deserialization failed: invalid payload")
-	return nil
-}
-
-func makeTestEventBook(seq int) *pb.EventBook {
-	evt, _ := anypb.New(&emptypb.Empty{})
-	return &pb.EventBook{
-		Pages: []*pb.EventPage{
-			{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: uint32(seq)}}, Payload: &pb.EventPage_Event{Event: evt}},
-		},
-	}
-}
-
-// AggregateClientContext holds state for aggregate client command execution scenarios
+// AggregateClientContext holds per-scenario state.
 type AggregateClientContext struct {
-	eventBooks         map[string]*pb.EventBook
-	lastResult         *pb.EventBook
-	lastError          error
-	lastResponse       *pb.BusinessResponse
-	correlationID      string
-	serviceUnavailable bool
-	serviceTimeout     bool
-	currentDomain      string
-	currentRoot        string
-	currentSequence    uint32
+	backend *testBackend
+	client  *angzarr.CommandHandlerClient
+
+	domain string
+	root   []byte
+
+	lastResp  *pb.CommandResponse
+	lastErr   error
+	otherErr  error // second concurrent command
+	lookedUp  uint32
+	timeoutMS int
 }
 
 func newAggregateClientContext() *AggregateClientContext {
-	return &AggregateClientContext{
-		eventBooks: make(map[string]*pb.EventBook),
+	return &AggregateClientContext{}
+}
+
+func (c *AggregateClientContext) ensureBackend() {
+	if c.backend == nil {
+		c.backend = newTestBackend()
+		c.client = angzarr.CommandHandlerClientFromService(c.backend)
 	}
 }
 
-func (c *AggregateClientContext) key(domain, root string) string {
-	return domain + "/" + root
-}
-
-// Background
-
-func (c *AggregateClientContext) anAggregateClientConnectedToTheTestBackend() error {
-	return nil
-}
-
-// Basic Command Execution
-
-func (c *AggregateClientContext) aNewAggregateRootInDomain(domain string) error {
-	c.currentDomain = domain
-	c.currentRoot = "new-root"
-	c.currentSequence = 0
-	return nil
-}
-
-func (c *AggregateClientContext) iExecuteACommandWithData(cmdType, data string) error {
-	evt, _ := anypb.New(&emptypb.Empty{})
-	c.lastResult = &pb.EventBook{
-		Cover: &pb.Cover{
-			Domain:        c.currentDomain,
-			CorrelationId: c.correlationID,
-		},
-		Pages: []*pb.EventPage{
-			{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: c.currentSequence}}, Payload: &pb.EventPage_Event{Event: evt}},
-		},
-	}
-	c.lastResponse = &pb.BusinessResponse{
-		Result: &pb.BusinessResponse_Events{Events: c.lastResult},
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) anAggregateWithRootAtSequence(domain, root string, seq int) error {
-	c.currentDomain = domain
-	c.currentRoot = root
-	c.currentSequence = uint32(seq)
-	book := &pb.EventBook{
-		Cover:        &pb.Cover{Domain: domain, Root: &pb.UUID{Value: []byte(root)}},
-		NextSequence: uint32(seq),
-	}
-	for i := 0; i < seq; i++ {
-		evt, _ := anypb.New(&emptypb.Empty{})
-		book.Pages = append(book.Pages, &pb.EventPage{
-			Header:  &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: uint32(i)}},
-			Payload: &pb.EventPage_Event{Event: evt},
-		})
-	}
-	c.eventBooks[c.key(domain, root)] = book
-	return nil
-}
-
-func (c *AggregateClientContext) iExecuteACommandAtSequence(seq int) error {
-	if uint32(seq) != c.currentSequence {
-		c.lastError = fmt.Errorf("sequence mismatch: expected %d, got %d", c.currentSequence, seq)
-		return nil
-	}
-	evt, _ := anypb.New(&emptypb.Empty{})
-	c.lastResult = &pb.EventBook{
-		Cover: &pb.Cover{Domain: c.currentDomain},
-		Pages: []*pb.EventPage{
-			{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: uint32(seq)}}, Payload: &pb.EventPage_Event{Event: evt}},
-		},
-	}
-	c.lastResponse = &pb.BusinessResponse{
-		Result: &pb.BusinessResponse_Events{Events: c.lastResult},
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) iExecuteACommandWithCorrelationID(correlationID string) error {
-	c.correlationID = correlationID
-	evt, _ := anypb.New(&emptypb.Empty{})
-	c.lastResult = &pb.EventBook{
-		Cover: &pb.Cover{
-			Domain:        c.currentDomain,
-			CorrelationId: correlationID,
-		},
-		Pages: []*pb.EventPage{
-			{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: c.currentSequence}}, Payload: &pb.EventPage_Event{Event: evt}},
-		},
-	}
-	c.lastResponse = &pb.BusinessResponse{
-		Result: &pb.BusinessResponse_Events{Events: c.lastResult},
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) theCommandShouldSucceed() error {
-	if c.lastError != nil {
-		return fmt.Errorf("expected command to succeed, got error: %v", c.lastError)
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) theResponseShouldContainEvents(count int) error {
-	if c.lastResult == nil || len(c.lastResult.Pages) != count {
-		return fmt.Errorf("expected %d events, got %d", count, len(c.lastResult.Pages))
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) theEventShouldHaveType(eventType string) error {
-	// Type is encoded in the Any type_url
-	return nil
-}
-
-func (c *AggregateClientContext) theResponseShouldContainEventsStartingAtSequence(seq int) error {
-	if c.lastResult == nil || len(c.lastResult.Pages) == 0 {
-		return fmt.Errorf("no events in response")
-	}
-	if c.lastResult.Pages[0].GetHeader().GetSequence() != uint32(seq) {
-		return fmt.Errorf("expected events starting at sequence %d, got %d", seq, c.lastResult.Pages[0].GetHeader().GetSequence())
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) theResponseEventsShouldHaveCorrelationID(correlationID string) error {
-	if c.lastResult == nil || c.lastResult.Cover == nil {
-		return fmt.Errorf("no result")
-	}
-	if c.lastResult.Cover.CorrelationId != correlationID {
-		return fmt.Errorf("expected correlation ID %s, got %s", correlationID, c.lastResult.Cover.CorrelationId)
-	}
-	return nil
-}
-
-// Optimistic Concurrency
-
-func (c *AggregateClientContext) theCommandShouldFailWithPreconditionError() error {
-	if c.lastError == nil {
-		return fmt.Errorf("expected precondition error")
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) theErrorShouldIndicateSequenceMismatch() error {
-	if c.lastError == nil {
-		return fmt.Errorf("expected an error")
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) twoCommandsAreSentConcurrentlyAtSequence(seq int) error {
-	// Simulate concurrent writes - one will fail
-	c.lastError = fmt.Errorf("sequence mismatch")
-	return nil
-}
-
-func (c *AggregateClientContext) oneShouldSucceed() error {
-	return nil
-}
-
-func (c *AggregateClientContext) oneShouldFailWithPreconditionError() error {
-	return nil
-}
-
-func (c *AggregateClientContext) iQueryTheCurrentSequenceForRoot(domain, root string) error {
-	if book, ok := c.eventBooks[c.key(domain, root)]; ok {
-		c.currentSequence = book.NextSequence
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) iRetryTheCommandAtTheCorrectSequence() error {
-	c.lastError = nil
-	evt, _ := anypb.New(&emptypb.Empty{})
-	c.lastResult = &pb.EventBook{
-		Cover: &pb.Cover{Domain: c.currentDomain},
-		Pages: []*pb.EventPage{
-			{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: c.currentSequence}}, Payload: &pb.EventPage_Event{Event: evt}},
-		},
-	}
-	return nil
-}
-
-// Sync Modes
-
-func (c *AggregateClientContext) projectorsAreConfiguredForDomain(domain string) error {
-	return nil
-}
-
-func (c *AggregateClientContext) sagasAreConfiguredForDomain(domain string) error {
-	return nil
-}
-
-func (c *AggregateClientContext) iExecuteACommandAsynchronously() error {
-	return c.iExecuteACommandWithData("Test", "data")
-}
-
-func (c *AggregateClientContext) iExecuteACommandWithSyncModeSIMPLE() error {
-	return c.iExecuteACommandWithData("Test", "data")
-}
-
-func (c *AggregateClientContext) iExecuteACommandWithSyncModeCASCADE() error {
-	return c.iExecuteACommandWithData("Test", "data")
-}
-
-func (c *AggregateClientContext) theResponseShouldReturnWithoutWaitingForProjectors() error {
-	return nil
-}
-
-func (c *AggregateClientContext) theResponseShouldIncludeProjectorResults() error {
-	return nil
-}
-
-func (c *AggregateClientContext) theResponseShouldIncludeDownstreamSagaResults() error {
-	return nil
-}
-
-// Command Validation
-
-func (c *AggregateClientContext) anAggregateWithRoot(domain, root string) error {
-	c.currentDomain = domain
-	c.currentRoot = root
-	c.currentSequence = 0
-	c.eventBooks[c.key(domain, root)] = &pb.EventBook{
-		Cover: &pb.Cover{Domain: domain, Root: &pb.UUID{Value: []byte(root)}},
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) iExecuteACommandWithMalformedPayload() error {
-	c.lastError = fmt.Errorf("invalid argument: malformed payload")
-	return nil
-}
-
-func (c *AggregateClientContext) theCommandShouldFailWithInvalidArgumentError() error {
-	if c.lastError == nil {
-		return fmt.Errorf("expected invalid argument error")
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) iExecuteACommandWithoutRequiredFields() error {
-	c.lastError = fmt.Errorf("invalid argument: missing required field")
-	return nil
-}
-
-func (c *AggregateClientContext) theErrorMessageShouldDescribeTheMissingField() error {
-	return nil
-}
-
-func (c *AggregateClientContext) iExecuteACommandToDomain(domain string) error {
-	if domain == "nonexistent" {
-		c.lastError = fmt.Errorf("unknown domain: %s", domain)
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) theCommandShouldFail() error {
-	if c.lastError == nil {
-		return fmt.Errorf("expected command to fail")
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) theErrorShouldIndicateUnknownDomain() error {
-	return nil
-}
-
-// Multi-Event Commands
-
-func (c *AggregateClientContext) iExecuteACommandThatProducesEvents(count int) error {
-	pages := make([]*pb.EventPage, count)
-	for i := 0; i < count; i++ {
-		evt, _ := anypb.New(&emptypb.Empty{})
-		pages[i] = &pb.EventPage{
-			Header:  &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: c.currentSequence + uint32(i)}},
-			Payload: &pb.EventPage_Event{Event: evt},
-		}
-	}
-	c.lastResult = &pb.EventBook{
-		Cover: &pb.Cover{Domain: c.currentDomain},
-		Pages: pages,
-	}
-	c.lastResponse = &pb.BusinessResponse{
-		Result: &pb.BusinessResponse_Events{Events: c.lastResult},
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) eventsShouldHaveSequences(s1, s2, s3 int) error {
-	if c.lastResult == nil || len(c.lastResult.Pages) < 3 {
-		return fmt.Errorf("not enough events")
-	}
-	if c.lastResult.Pages[0].GetHeader().GetSequence() != uint32(s1) ||
-		c.lastResult.Pages[1].GetHeader().GetSequence() != uint32(s2) ||
-		c.lastResult.Pages[2].GetHeader().GetSequence() != uint32(s3) {
-		return fmt.Errorf("sequence mismatch")
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) iQueryEventsForRoot(domain, root string) error {
-	c.lastResult = c.eventBooks[c.key(domain, root)]
-	return nil
-}
-
-func (c *AggregateClientContext) iShouldSeeAllEventsOrNone(count int) error {
-	// Atomicity - we either see all or none
-	return nil
-}
-
-// Connection Handling
-
-func (c *AggregateClientContext) theAggregateServiceIsUnavailable() error {
-	c.serviceUnavailable = true
-	return nil
-}
-
-func (c *AggregateClientContext) iAttemptToExecuteACommand() error {
-	if c.serviceUnavailable {
-		c.lastError = fmt.Errorf("connection error: service unavailable")
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) theOperationShouldFailWithConnectionError() error {
-	if c.lastError == nil {
-		return fmt.Errorf("expected connection error")
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) theAggregateServiceIsSlowToRespond() error {
-	c.serviceTimeout = true
-	return nil
-}
-
-func (c *AggregateClientContext) iExecuteACommandWithTimeoutMs(timeout int) error {
-	if c.serviceTimeout && timeout < 1000 {
-		c.lastError = fmt.Errorf("deadline exceeded")
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) theOperationShouldFailWithTimeoutOrDeadlineError() error {
-	if c.lastError == nil {
-		return fmt.Errorf("expected timeout error")
-	}
-	return nil
-}
-
-// New Aggregate Creation
-
-func (c *AggregateClientContext) noAggregateExistsForDomainRoot(domain, root string) error {
-	c.currentDomain = domain
-	c.currentRoot = root
-	c.currentSequence = 0
-	return nil
-}
-
-func (c *AggregateClientContext) iExecuteACommandForRootAtSequence(cmdType, root string, seq int) error {
-	if seq != 0 && c.eventBooks[c.key(c.currentDomain, root)] == nil {
-		c.lastError = fmt.Errorf("sequence mismatch: aggregate does not exist")
-		return nil
-	}
-	evt, _ := anypb.New(&emptypb.Empty{})
-	c.lastResult = &pb.EventBook{
-		Cover: &pb.Cover{Domain: c.currentDomain, Root: &pb.UUID{Value: []byte(root)}},
-		Pages: []*pb.EventPage{
-			{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: uint32(seq)}}, Payload: &pb.EventPage_Event{Event: evt}},
-		},
-	}
-	c.eventBooks[c.key(c.currentDomain, root)] = c.lastResult
-	return nil
-}
-
-func (c *AggregateClientContext) theAggregateShouldNowExistWithEvents(count int) error {
-	if c.lastResult == nil || len(c.lastResult.Pages) != count {
-		return fmt.Errorf("expected %d events", count)
-	}
-	return nil
-}
-
-// Handler pattern steps
-
-func (c *AggregateClientContext) anAggregateHandler() error {
-	return nil
-}
-
-func (c *AggregateClientContext) anAggregateHandlerWithValidation() error {
-	return nil
-}
-
-func (c *AggregateClientContext) anAggregateWithGuardCheckingAggregateExists() error {
-	return nil
-}
-
-func (c *AggregateClientContext) aHandlerEmitsEvents(count int) error {
-	pages := make([]*pb.EventPage, count)
-	for i := 0; i < count; i++ {
-		evt, _ := anypb.New(&emptypb.Empty{})
-		pages[i] = &pb.EventPage{
-			Header:  &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: uint32(i)}},
-			Payload: &pb.EventPage_Event{Event: evt},
-		}
-	}
-	c.lastResult = &pb.EventBook{Pages: pages}
-	return nil
-}
-
-func (c *AggregateClientContext) aHandlerProducesACommand() error {
-	return nil
-}
-
-func (c *AggregateClientContext) guardAndValidatePass() error {
-	// Simulate successful guard/validate producing events
-	evt, _ := anypb.New(&emptypb.Empty{})
-	c.lastResult = &pb.EventBook{
-		Pages: []*pb.EventPage{
-			{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: 0}}, Payload: &pb.EventPage_Event{Event: evt}},
-		},
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) guardShouldReject() error {
-	c.lastError = fmt.Errorf("guard rejected: aggregate does not exist")
-	return nil
-}
-
-func (c *AggregateClientContext) computeShouldProduceEvents() error {
-	if c.lastResult == nil || len(c.lastResult.Pages) == 0 {
-		return fmt.Errorf("expected events")
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) eventsShouldReflectTheStateChange() error {
-	return nil
-}
-
-func (c *AggregateClientContext) anAggregateRouterWithHandlersFor(handlerType string) error {
-	return nil
-}
-
-func (c *AggregateClientContext) aRouterWithHandlerForProtobufMessageType() error {
-	return nil
-}
-
-func (c *AggregateClientContext) anEventBookShouldBeReturned() error {
-	if c.lastResult == nil {
-		return fmt.Errorf("expected EventBook")
-	}
-	return nil
-}
-
-func (c *AggregateClientContext) eventsOrderCreatedItemAddedItemAdded() error {
-	// Just sets up context for a 3-event scenario
-	return nil
-}
-
-func (c *AggregateClientContext) allEventsShouldBeProcessedInOrder(count int) error {
-	return nil
-}
-
-func (c *AggregateClientContext) eachShouldBeProcessedIndependently() error {
-	return nil
-}
-
-func (c *AggregateClientContext) eventsWithDifferentCorrelationIDsShouldHaveSeparateState() error {
-	return nil
-}
-
-// Query and snapshot steps
-
-func (c *AggregateClientContext) aSnapshotAtSequence(seq int) error {
-	return nil
-}
-
-func (c *AggregateClientContext) anAggregateWithRootHasASnapshotAtSequenceAndEvents(domain, root string, snapSeq, eventCount int) error {
-	book := &pb.EventBook{
-		Cover: &pb.Cover{Domain: domain, Root: &pb.UUID{Value: []byte(root)}},
-		Snapshot: &pb.Snapshot{
-			Sequence: uint32(snapSeq),
-		},
-		NextSequence: uint32(snapSeq + eventCount),
-	}
-	for i := snapSeq; i < snapSeq+eventCount; i++ {
-		evt, _ := anypb.New(&emptypb.Empty{})
-		book.Pages = append(book.Pages, &pb.EventPage{
-			Header:  &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: uint32(i)}},
-			Payload: &pb.EventPage_Event{Event: evt},
-		})
-	}
-	c.eventBooks[c.key(domain, root)] = book
-	return nil
-}
-
-func (c *AggregateClientContext) aQueryClientImplementation() error {
-	return nil
-}
-
-func (c *AggregateClientContext) events(seq1, seq2, seq3 int) error {
-	pages := []*pb.EventPage{}
-	for _, seq := range []int{seq1, seq2, seq3} {
-		evt, _ := anypb.New(&emptypb.Empty{})
-		pages = append(pages, &pb.EventPage{
-			Header:  &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: uint32(seq)}},
-			Payload: &pb.EventPage_Event{Event: evt},
-		})
-	}
-	c.lastResult = &pb.EventBook{Pages: pages}
-	return nil
-}
-
-func (c *AggregateClientContext) eventsWithType_urls(table *godog.Table) error {
-	pages := []*pb.EventPage{}
-	for i, row := range table.Rows {
-		if i == 0 {
-			continue // Skip header
-		}
-		var typeURL string
-		if len(row.Cells) >= 1 {
-			typeURL = row.Cells[0].Value
-		}
-		pages = append(pages, &pb.EventPage{
-			Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: uint32(i - 1)}},
-			Payload: &pb.EventPage_Event{
-				Event: &anypb.Any{TypeUrl: typeURL, Value: []byte{}},
+func payloadFor(data string, count uint32) *anypb.Any {
+	value, _ := proto.Marshal(&pb.Projection{Projector: data, Sequence: count})
+	return &anypb.Any{Value: value} // TypeUrl set by command builder
+}
+
+func (c *AggregateClientContext) command(cmdType, data string, seq, count uint32, correlation string) *pb.CommandBook {
+	payload := payloadFor(data, count)
+	payload.TypeUrl = angzarr.TypeURLPrefix + cmdType
+	return &pb.CommandBook{
+		Cover: &pb.Cover{Domain: c.domain, Root: &pb.UUID{Value: c.root}, CorrelationId: correlation},
+		Pages: []*pb.CommandPage{
+			{
+				Header:  &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: seq}},
+				Payload: &pb.CommandPage_Command{Command: payload},
 			},
-		})
+		},
 	}
-	c.lastResult = &pb.EventBook{Pages: pages}
+}
+
+func (c *AggregateClientContext) send(cmd *pb.CommandBook, mode pb.SyncMode) error {
+	ctx := context.Background()
+	if c.timeoutMS > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(c.timeoutMS)*time.Millisecond)
+		defer cancel()
+	}
+	c.lastResp, c.lastErr = c.client.HandleCommand(ctx, &pb.CommandRequest{Command: cmd, SyncMode: mode})
 	return nil
 }
 
-// InitAggregateClientSteps registers the aggregate client step definitions
-func InitAggregateClientSteps(ctx *godog.ScenarioContext) {
+func (c *AggregateClientContext) clientError() *angzarr.ClientError {
+	return angzarr.AsClientError(c.lastErr)
+}
+
+// InitAggregateSteps registers aggregate_client.feature step definitions.
+func InitAggregateSteps(ctx *godog.ScenarioContext) {
 	c := newAggregateClientContext()
 
-	// Background
-	ctx.Step(`^an AggregateClient connected to the test backend$`, c.anAggregateClientConnectedToTheTestBackend)
-
-	// Basic Command Execution
-	ctx.Step(`^a new aggregate root in domain "([^"]*)"$`, c.aNewAggregateRootInDomain)
-	ctx.Step(`^I execute a "([^"]*)" command with data "([^"]*)"$`, c.iExecuteACommandWithData)
-	ctx.Step(`^an aggregate "([^"]*)" with root "([^"]*)" at sequence (\d+)$`, c.anAggregateWithRootAtSequence)
-	ctx.Step(`^I execute a "([^"]*)" command at sequence (\d+)$`, func(cmd string, seq int) error {
-		return c.iExecuteACommandAtSequence(seq)
-	})
-	ctx.Step(`^I execute a command at sequence (\d+)$`, c.iExecuteACommandAtSequence)
-	ctx.Step(`^I execute a command with correlation ID "([^"]*)"$`, c.iExecuteACommandWithCorrelationID)
-	ctx.Step(`^the command should succeed$`, c.theCommandShouldSucceed)
-	ctx.Step(`^the response should contain (\d+) event$`, c.theResponseShouldContainEvents)
-	ctx.Step(`^the response should contain (\d+) events$`, c.theResponseShouldContainEvents)
-	ctx.Step(`^the event should have type "([^"]*)"$`, c.theEventShouldHaveType)
-	ctx.Step(`^the response should contain events starting at sequence (\d+)$`, c.theResponseShouldContainEventsStartingAtSequence)
-	ctx.Step(`^the response events should have correlation ID "([^"]*)"$`, c.theResponseEventsShouldHaveCorrelationID)
-
-	// Optimistic Concurrency
-	ctx.Step(`^the command should fail with precondition error$`, c.theCommandShouldFailWithPreconditionError)
-	ctx.Step(`^the error should indicate sequence mismatch$`, c.theErrorShouldIndicateSequenceMismatch)
-	ctx.Step(`^two commands are sent concurrently at sequence (\d+)$`, c.twoCommandsAreSentConcurrentlyAtSequence)
-	ctx.Step(`^one should succeed$`, c.oneShouldSucceed)
-	ctx.Step(`^one should fail with precondition error$`, c.oneShouldFailWithPreconditionError)
-	ctx.Step(`^I query the current sequence for "([^"]*)" root "([^"]*)"$`, c.iQueryTheCurrentSequenceForRoot)
-	ctx.Step(`^I retry the command at the correct sequence$`, c.iRetryTheCommandAtTheCorrectSequence)
-
-	// Sync Modes
-	ctx.Step(`^projectors are configured for "([^"]*)" domain$`, c.projectorsAreConfiguredForDomain)
-	ctx.Step(`^sagas are configured for "([^"]*)" domain$`, c.sagasAreConfiguredForDomain)
-	ctx.Step(`^I execute a command asynchronously$`, c.iExecuteACommandAsynchronously)
-	ctx.Step(`^I execute a command with sync mode SIMPLE$`, c.iExecuteACommandWithSyncModeSIMPLE)
-	ctx.Step(`^I execute a command with sync mode CASCADE$`, c.iExecuteACommandWithSyncModeCASCADE)
-	ctx.Step(`^the response should return without waiting for projectors$`, c.theResponseShouldReturnWithoutWaitingForProjectors)
-	ctx.Step(`^the response should include projector results$`, c.theResponseShouldIncludeProjectorResults)
-	ctx.Step(`^the response should include downstream saga results$`, c.theResponseShouldIncludeDownstreamSagaResults)
-
-	// Command Validation
-	ctx.Step(`^an aggregate "([^"]*)" with root "([^"]*)"$`, c.anAggregateWithRoot)
-	ctx.Step(`^I execute a command with malformed payload$`, c.iExecuteACommandWithMalformedPayload)
-	ctx.Step(`^the command should fail with invalid argument error$`, c.theCommandShouldFailWithInvalidArgumentError)
-	ctx.Step(`^I execute a command without required fields$`, c.iExecuteACommandWithoutRequiredFields)
-	ctx.Step(`^the error message should describe the missing field$`, c.theErrorMessageShouldDescribeTheMissingField)
-	ctx.Step(`^I execute a command to domain "([^"]*)"$`, c.iExecuteACommandToDomain)
-	ctx.Step(`^the command should fail$`, c.theCommandShouldFail)
-	ctx.Step(`^the error should indicate unknown domain$`, c.theErrorShouldIndicateUnknownDomain)
-
-	// Multi-Event Commands
-	ctx.Step(`^I execute a command that produces (\d+) events$`, c.iExecuteACommandThatProducesEvents)
-	ctx.Step(`^events should have sequences (\d+), (\d+), (\d+)$`, c.eventsShouldHaveSequences)
-	// Note: "I query events for ... root ..." is registered by QueryClientContext
-	ctx.Step(`^I should see all (\d+) events or none$`, c.iShouldSeeAllEventsOrNone)
-
-	// Connection Handling
-	ctx.Step(`^the aggregate service is unavailable$`, c.theAggregateServiceIsUnavailable)
-	ctx.Step(`^I attempt to execute a command$`, c.iAttemptToExecuteACommand)
-	ctx.Step(`^the aggregate operation should fail with connection error$`, c.theOperationShouldFailWithConnectionError)
-	ctx.Step(`^the aggregate service is slow to respond$`, c.theAggregateServiceIsSlowToRespond)
-	ctx.Step(`^I execute a command with timeout (\d+)ms$`, c.iExecuteACommandWithTimeoutMs)
-	ctx.Step(`^the operation should fail with timeout or deadline error$`, c.theOperationShouldFailWithTimeoutOrDeadlineError)
-
-	// New Aggregate Creation
-	ctx.Step(`^no aggregate exists for domain "([^"]*)" root "([^"]*)"$`, c.noAggregateExistsForDomainRoot)
-	ctx.Step(`^I execute a "([^"]*)" command for root "([^"]*)" at sequence (\d+)$`, c.iExecuteACommandForRootAtSequence)
-	ctx.Step(`^the aggregate should now exist with (\d+) event$`, c.theAggregateShouldNowExistWithEvents)
-
-	// Handler Pattern / router steps moved to features/router.go
-	// (InitRouterSteps), which drives the real CommandRouter, EventRouter,
-	// SagaRouter, ProcessManagerRouter and ProjectorRouter instead of
-	// simulating dispatch. Coordinator-side router scenarios are @wip in
-	// router.feature and intentionally unbound.
-	// NOTE: "an EventBook should be returned" is registered by QueryContext
-
-	// Snapshot and Query
-	ctx.Step(`^a snapshot at sequence (\d+)$`, c.aSnapshotAtSequence)
-	// Note: "an aggregate ... has a snapshot..." is registered by QueryClientContext
-	ctx.Step(`^a QueryClient implementation$`, c.aQueryClientImplementation)
-	ctx.Step(`^events (\d+), (\d+), (\d+)$`, c.events)
-	ctx.Step(`^events with type_urls:$`, c.eventsWithType_urls)
-
-	// --- New (Batch 6+7) phrases from the rewritten aggregate_client.feature ---
-	// "AggregateClient" → "client", "I execute" → "I send",
-	// "fail with precondition error" → "refused because the aggregate has
-	// moved on", and many other reworded scenario lines. Stubs FAIL until
-	// wired through to real assertions.
-
-	// TODO (WIP): Implement this step matcher properly.
+	// --- Background / givens ---
 	ctx.Step(`^a client connected to the test backend$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
+		c.ensureBackend()
+		return nil
 	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^I send a "([^"]*)" command with data "([^"]*)"$`, func(cmd, data string) error {
-		return fmt.Errorf("WIP: step needs implementation")
+	ctx.Step(`^a new aggregate root in domain "([^"]*)"$`, func(domain string) error {
+		c.ensureBackend()
+		c.domain, c.root = domain, []byte("fresh-root")
+		return nil
 	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^the command is accepted$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
+	ctx.Step(`^an aggregate "([^"]*)" with root "([^"]*)" at sequence (\d+)$`, func(domain, root string, seq int) error {
+		c.ensureBackend()
+		c.domain, c.root = domain, []byte(root)
+		c.backend.seed(domain, c.root, uint32(seq))
+		return nil
 	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^a single "([^"]*)" event is recorded$`, func(eventType string) error {
-		return fmt.Errorf("WIP: step needs implementation")
+	ctx.Step(`^an aggregate "([^"]*)" with root "([^"]*)"$`, func(domain, root string) error {
+		c.ensureBackend()
+		c.domain, c.root = domain, []byte(root)
+		c.backend.seed(domain, c.root, 0)
+		return nil
 	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^I send an "([^"]*)" command at sequence (\d+)$`, func(cmd string, seq int) error {
-		return fmt.Errorf("WIP: step needs implementation")
+	ctx.Step(`^no aggregate exists for domain "([^"]*)" root "([^"]*)"$`, func(domain, root string) error {
+		c.ensureBackend()
+		c.domain, c.root = domain, []byte(root)
+		return nil
 	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^the new events continue the history from sequence (\d+)$`, func(seq int) error {
-		return fmt.Errorf("WIP: step needs implementation")
+	ctx.Step(`^projectors are configured for "([^"]*)" domain$`, func(string) error {
+		c.backend.projectorsConfigured = true
+		return nil
 	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^I send a command tagged with correlation ID "([^"]*)"$`, func(cid string) error {
-		return fmt.Errorf("WIP: step needs implementation")
+	ctx.Step(`^sagas are configured for "([^"]*)" domain$`, func(string) error {
+		c.backend.sagasConfigured = true
+		return nil
 	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^the resulting events carry correlation ID "([^"]*)"$`, func(cid string) error {
-		return fmt.Errorf("WIP: step needs implementation")
+	ctx.Step(`^the aggregate service is unavailable$`, func() error {
+		c.ensureBackend()
+		c.domain, c.root = "orders", []byte("any")
+		c.backend.unavailable = true
+		return nil
 	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^I send a command at sequence (\d+)$`, func(seq int) error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^the command is refused because the aggregate has moved on$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^one command is accepted$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^the other is refused because the aggregate has moved on$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^I look up the current sequence for "([^"]*)" root "([^"]*)"$`, func(domain, root string) error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^I retry the command at that sequence$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^I send a command without waiting for downstream work$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^the response returns before any projectors have caught up$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^I send a command and wait for projectors$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^the response reflects the projectors having processed the event$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^I send a command and wait for downstream sagas$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^the response reflects the downstream sagas having completed$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^I send a command with a malformed payload$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^the command is refused as invalid$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^I send a command missing required fields$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^the refusal names the missing field$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^I send a command to domain "([^"]*)"$`, func(domain string) error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^the command is refused because the domain is unknown$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^I send a command that produces (\d+) events$`, func(n int) error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^(\d+) events are recorded$`, func(n int) error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^the events occupy consecutive sequences starting at (\d+)$`, func(seq int) error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^I read back the events for "([^"]*)" root "([^"]*)"$`, func(domain, root string) error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^either all (\d+) events are present or none of them are$`, func(n int) error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^I attempt to send a command$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^the call fails because the service cannot be reached$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
 	ctx.Step(`^the aggregate service does not respond in time$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
+		c.ensureBackend()
+		c.domain, c.root = "orders", []byte("any")
+		c.backend.slow = true
+		return nil
 	})
-	// TODO (WIP): Implement this step matcher properly.
+
+	// --- Whens: sending commands ---
+	ctx.Step(`^I send a "([^"]*)" command with data "([^"]*)"$`, func(cmdType, data string) error {
+		return c.send(c.command("test."+cmdType, data, 0, 0, ""), pb.SyncMode_SYNC_MODE_ASYNC)
+	})
+	ctx.Step(`^I send an? "([^"]*)" command at sequence (\d+)$`, func(cmdType string, seq int) error {
+		return c.send(c.command("test."+cmdType, "data", uint32(seq), 0, ""), pb.SyncMode_SYNC_MODE_ASYNC)
+	})
+	ctx.Step(`^I send a command at sequence (\d+)$`, func(seq int) error {
+		return c.send(c.command(fqAddItem, "data", uint32(seq), 0, ""), pb.SyncMode_SYNC_MODE_ASYNC)
+	})
+	ctx.Step(`^I send a command tagged with correlation ID "([^"]*)"$`, func(cid string) error {
+		return c.send(c.command(fqCreateOrder, "data", 0, 0, cid), pb.SyncMode_SYNC_MODE_ASYNC)
+	})
+	ctx.Step(`^two commands are sent concurrently at sequence (\d+)$`, func(seq int) error {
+		_ = c.send(c.command(fqAddItem, "data", uint32(seq), 0, ""), pb.SyncMode_SYNC_MODE_ASYNC)
+		first := c.lastErr
+		_ = c.send(c.command(fqAddItem, "data", uint32(seq), 0, ""), pb.SyncMode_SYNC_MODE_ASYNC)
+		c.otherErr = c.lastErr
+		c.lastErr = first
+		return nil
+	})
+	ctx.Step(`^I look up the current sequence for "([^"]*)" root "([^"]*)"$`, func(domain, root string) error {
+		book := c.backend.recorded(domain, []byte(root))
+		if book == nil {
+			return fmt.Errorf("aggregate not found")
+		}
+		c.lookedUp = book.NextSequence
+		return nil
+	})
+	ctx.Step(`^I retry the command at that sequence$`, func() error {
+		return c.send(c.command(fqAddItem, "data", c.lookedUp, 0, ""), pb.SyncMode_SYNC_MODE_ASYNC)
+	})
+	ctx.Step(`^I send a command without waiting for downstream work$`, func() error {
+		return c.send(c.command(fqCreateOrder, "data", 0, 0, ""), pb.SyncMode_SYNC_MODE_ASYNC)
+	})
+	ctx.Step(`^I send a command and wait for projectors$`, func() error {
+		return c.send(c.command(fqCreateOrder, "data", 0, 0, ""), pb.SyncMode_SYNC_MODE_SIMPLE)
+	})
+	ctx.Step(`^I send a command and wait for downstream sagas$`, func() error {
+		return c.send(c.command(fqCreateOrder, "data", 0, 0, ""), pb.SyncMode_SYNC_MODE_CASCADE)
+	})
+	ctx.Step(`^I send a command with a malformed payload$`, func() error {
+		cmd := c.command(fqCreateOrder, "", 0, 0, "")
+		cmd.Pages[0].GetCommand().Value = []byte{0xFF, 0xFF, 0xFF, 0xFF}
+		return c.send(cmd, pb.SyncMode_SYNC_MODE_ASYNC)
+	})
+	ctx.Step(`^I send a command missing required fields$`, func() error {
+		return c.send(c.command(fqCreateOrder, "", 0, 0, ""), pb.SyncMode_SYNC_MODE_ASYNC)
+	})
+	ctx.Step(`^I send a command to domain "([^"]*)"$`, func(domain string) error {
+		c.domain, c.root = domain, []byte("any")
+		return c.send(c.command(fqCreateOrder, "data", 0, 0, ""), pb.SyncMode_SYNC_MODE_ASYNC)
+	})
+	ctx.Step(`^I send a command that produces (\d+) events$`, func(n int) error {
+		return c.send(c.command(fqMultiEvent, "data", 0, uint32(n), ""), pb.SyncMode_SYNC_MODE_ASYNC)
+	})
+	ctx.Step(`^I attempt to send a command$`, func() error {
+		return c.send(c.command(fqCreateOrder, "data", 0, 0, ""), pb.SyncMode_SYNC_MODE_ASYNC)
+	})
 	ctx.Step(`^I send a command with a short timeout$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
+		c.timeoutMS = 50
+		return c.send(c.command(fqCreateOrder, "data", 0, 0, ""), pb.SyncMode_SYNC_MODE_ASYNC)
 	})
-	// TODO (WIP): Implement this step matcher properly.
+	ctx.Step(`^I send a "([^"]*)" command for root "([^"]*)" at sequence (\d+)$`, func(cmdType, root string, seq int) error {
+		c.root = []byte(root)
+		return c.send(c.command("test."+cmdType, "data", uint32(seq), 0, ""), pb.SyncMode_SYNC_MODE_ASYNC)
+	})
+	ctx.Step(`^I read back the events for "([^"]*)" root "([^"]*)"$`, func(domain, root string) error {
+		if c.backend.recorded(domain, []byte(root)) == nil {
+			return fmt.Errorf("no events recorded")
+		}
+		return nil
+	})
+
+	// --- Thens: acceptance ---
+	ctx.Step(`^the command is accepted$`, func() error {
+		if c.lastErr != nil {
+			return fmt.Errorf("command refused: %v", c.lastErr)
+		}
+		return nil
+	})
+	ctx.Step(`^a single "([^"]*)" event is recorded$`, func(eventType string) error {
+		book := c.backend.recorded(c.domain, c.root)
+		if book == nil || len(book.Pages) != 1 {
+			return fmt.Errorf("recorded %d events, want 1", len(book.GetPages()))
+		}
+		want := angzarr.TypeURLPrefix + "test." + eventType
+		if got := book.Pages[0].GetEvent().GetTypeUrl(); got != want {
+			return fmt.Errorf("recorded %q, want %q", got, want)
+		}
+		return nil
+	})
+	ctx.Step(`^the new events continue the history from sequence (\d+)$`, func(seq int) error {
+		pages := c.lastResp.GetEvents().GetPages()
+		if len(pages) == 0 {
+			return fmt.Errorf("no new events")
+		}
+		if got := pages[0].GetHeader().GetSequence(); got != uint32(seq) {
+			return fmt.Errorf("first new event at sequence %d, want %d", got, seq)
+		}
+		return nil
+	})
+	ctx.Step(`^the resulting events carry correlation ID "([^"]*)"$`, func(cid string) error {
+		if got := c.lastResp.GetEvents().GetCover().GetCorrelationId(); got != cid {
+			return fmt.Errorf("correlation = %q, want %q", got, cid)
+		}
+		return nil
+	})
+
+	// --- Thens: refusals (coded, never substrings) ---
+	ctx.Step(`^the command is refused because the aggregate has moved on$`, func() error {
+		clientErr := c.clientError()
+		if clientErr == nil || !clientErr.IsPreconditionFailed() {
+			return fmt.Errorf("want FAILED_PRECONDITION, got %v", c.lastErr)
+		}
+		return nil
+	})
+	ctx.Step(`^one command is accepted$`, func() error {
+		if c.lastErr != nil && c.otherErr != nil {
+			return fmt.Errorf("both refused: %v / %v", c.lastErr, c.otherErr)
+		}
+		return nil
+	})
+	ctx.Step(`^the other is refused because the aggregate has moved on$`, func() error {
+		refused := angzarr.AsClientError(c.otherErr)
+		if refused == nil || !refused.IsPreconditionFailed() {
+			return fmt.Errorf("want FAILED_PRECONDITION on second write, got %v", c.otherErr)
+		}
+		return nil
+	})
+	ctx.Step(`^the command is refused as invalid$`, func() error {
+		clientErr := c.clientError()
+		if clientErr == nil || !clientErr.IsInvalidArgument() {
+			return fmt.Errorf("want InvalidArgument, got %v", c.lastErr)
+		}
+		return nil
+	})
+	ctx.Step(`^the refusal names the missing field$`, func() error {
+		clientErr := c.clientError()
+		if clientErr == nil || clientErr.Extras["field"] != fieldCustomer {
+			return fmt.Errorf("refusal extras = %v, want field=%s (via wire ErrorInfo)", clientErr.Extras, fieldCustomer)
+		}
+		return nil
+	})
+	ctx.Step(`^the command is refused because the domain is unknown$`, func() error {
+		clientErr := c.clientError()
+		if clientErr == nil || !clientErr.IsNotFound() {
+			return fmt.Errorf("want NotFound for unknown domain, got %v", c.lastErr)
+		}
+		return nil
+	})
+
+	// --- Thens: sync modes ---
+	ctx.Step(`^the response returns before any projectors have caught up$`, func() error {
+		if c.lastErr != nil {
+			return c.lastErr
+		}
+		if len(c.lastResp.GetProjections()) != 0 || c.backend.projectorRuns != 0 {
+			return fmt.Errorf("ASYNC response waited for projectors")
+		}
+		return nil
+	})
+	ctx.Step(`^the response reflects the projectors having processed the event$`, func() error {
+		if len(c.lastResp.GetProjections()) == 0 {
+			return fmt.Errorf("no projector results in SIMPLE response")
+		}
+		return nil
+	})
+	ctx.Step(`^the response reflects the downstream sagas having completed$`, func() error {
+		if !c.backend.sagaCompleted {
+			return fmt.Errorf("saga chain did not complete before response")
+		}
+		return nil
+	})
+
+	// --- Thens: multi-event ---
+	ctx.Step(`^(\d+) events are recorded$`, func(n int) error {
+		book := c.backend.recorded(c.domain, c.root)
+		if got := len(book.GetPages()); got != n {
+			return fmt.Errorf("recorded %d events, want %d", got, n)
+		}
+		return nil
+	})
+	ctx.Step(`^the events occupy consecutive sequences starting at (\d+)$`, func(start int) error {
+		book := c.backend.recorded(c.domain, c.root)
+		for i, page := range book.GetPages() {
+			if got := page.GetHeader().GetSequence(); got != uint32(start+i) {
+				return fmt.Errorf("event %d at sequence %d, want %d", i, got, start+i)
+			}
+		}
+		return nil
+	})
+	ctx.Step(`^either all (\d+) events are present or none of them are$`, func(n int) error {
+		book := c.backend.recorded(c.domain, c.root)
+		if got := len(book.GetPages()); got != 0 && got != n {
+			return fmt.Errorf("partial write: %d of %d events", got, n)
+		}
+		return nil
+	})
+
+	// --- Thens: connection handling ---
+	ctx.Step(`^the call fails because the service cannot be reached$`, func() error {
+		clientErr := c.clientError()
+		if clientErr == nil || clientErr.GRPCCode() != codes.Unavailable {
+			return fmt.Errorf("want Unavailable, got %v", c.lastErr)
+		}
+		return nil
+	})
 	ctx.Step(`^the call fails because the deadline was exceeded$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
+		clientErr := c.clientError()
+		if clientErr == nil || clientErr.GRPCCode() != codes.DeadlineExceeded {
+			return fmt.Errorf("want DeadlineExceeded, got %v", c.lastErr)
+		}
+		return nil
 	})
-	// TODO (WIP): Implement this step matcher properly.
-	ctx.Step(`^I send a "([^"]*)" command for root "([^"]*)" at sequence (\d+)$`, func(cmd, root string, seq int) error {
-		return fmt.Errorf("WIP: step needs implementation")
-	})
-	// TODO (WIP): Implement this step matcher properly.
+
+	// --- Thens: creation ---
 	ctx.Step(`^the aggregate now exists with one event$`, func() error {
-		return fmt.Errorf("WIP: step needs implementation")
+		book := c.backend.recorded(c.domain, c.root)
+		if book == nil || len(book.Pages) != 1 {
+			return fmt.Errorf("aggregate has %d events, want 1", len(book.GetPages()))
+		}
+		return nil
 	})
-}
-
-func InitializeAggregateScenario(ctx *godog.ScenarioContext) {
-	c := &AggregateContext{}
-
-	// Initialize aggregate client steps too
-	InitAggregateClientSteps(ctx)
-
-	// Router dispatch steps moved to features/router.go (InitRouterSteps),
-	// which drives the real routers. Steps for @wip coordinator-side
-	// scenarios (sequence gating, correlation guard, speculative mode,
-	// position tracking, subscription token matching) are intentionally
-	// left unbound so those scenarios report pending rather than passing
-	// vacuously.
-
-	// Client capability assertions
-	ctx.Step(`^I should receive no events$`, c.iShouldReceiveNoEvents)
-	// NOTE: "only the event pages should be returned$" is registered by QueryBuilderContext
-	ctx.Step(`^only the v(\d+) event should match$`, c.onlyTheVEventShouldMatch)
-	ctx.Step(`^the client should be able to execute commands$`, c.theClientShouldBeAbleToExecuteCommands)
-	ctx.Step(`^the client should be able to perform speculative operations$`, c.theClientShouldBeAbleToPerformSpeculativeOperations)
-	ctx.Step(`^the client should be able to query events$`, c.theClientShouldBeAbleToQueryEvents)
-	ctx.Step(`^the client should have aggregate and query sub-clients$`, c.theClientShouldHaveAggregateAndQuerySubclients)
-	ctx.Step(`^the client should have aggregate, query, and speculative sub-clients$`, c.theClientShouldHaveAggregateQueryAndSpeculativeSubclients)
-	// NOTE: "the EventBook metadata should be stripped$" is registered by QueryBuilderContext
-	// NOTE: "the EventBook should include the snapshot" is registered by QueryClientContext
-	ctx.Step(`^the rejection is received$`, c.theRejectionIsReceived)
-	ctx.Step(`^if type doesn\'t match, None is returned$`, c.ifTypeDoesntMatchNoneIsReturned)
-	ctx.Step(`^if type matches, Some\(T\) is returned$`, c.ifTypeMatchesSomeTIsReturned)
 }

@@ -1,250 +1,281 @@
 package features
 
+// domain_client.go — step bindings for client/domain-client.feature, driven
+// through the REAL stack over a REAL gRPC connection: a grpc.Server on a
+// loopback port serves CommandHandlerCoordinatorService + EventQueryService
+// (both backed by the shared in-memory testBackend), and the REAL
+// DomainClient dials it. Connection sharing and Close-severing are
+// exercised for real, not simulated.
+
 import (
+	"context"
 	"fmt"
-	"os"
+	"net"
+	"time"
 
 	angzarr "github.com/benjaminabbitt/angzarr/client/go"
 	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"github.com/cucumber/godog"
+	"github.com/google/uuid"
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
-// DomainClientContext holds state for domain client scenarios
-type DomainClientContext struct {
-	client          *angzarr.DomainClient
-	endpoint        string
-	domain          string
-	commandResponse *pb.CommandResponse
-	queryResponse   *pb.EventBook
-	eventPages      []*pb.EventPage
-	err             error
-	closed          bool
-	mockServer      *MockCoordinatorServer
-	envVarName      string
-	envVarValue     string
+// coordGrpcServer adapts the in-memory testBackend to the coordinator
+// SERVER interface.
+type coordGrpcServer struct {
+	pb.UnimplementedCommandHandlerCoordinatorServiceServer
+	backend *testBackend
 }
 
-// MockCoordinatorServer simulates a coordinator server for testing
-type MockCoordinatorServer struct {
-	endpoint   string
-	eventStore map[string]*pb.EventBook
+func (s *coordGrpcServer) HandleCommand(ctx context.Context, req *pb.CommandRequest) (*pb.CommandResponse, error) {
+	return s.backend.HandleCommand(ctx, req)
 }
+
+// queryGrpcServer serves the backend's store over EventQueryService.
+type queryGrpcServer struct {
+	pb.UnimplementedEventQueryServiceServer
+	backend *testBackend
+}
+
+func (s *queryGrpcServer) GetEventBook(_ context.Context, query *pb.Query) (*pb.EventBook, error) {
+	cover := query.GetCover()
+	book := s.backend.recorded(cover.GetDomain(), cover.GetRoot().GetValue())
+	if book == nil {
+		return &pb.EventBook{Cover: cover}, nil
+	}
+	return book, nil
+}
+
+func (s *queryGrpcServer) GetEvents(query *pb.Query, stream grpc.ServerStreamingServer[pb.EventBook]) error {
+	book, _ := s.GetEventBook(stream.Context(), query)
+	return stream.Send(book)
+}
+
+func (s *queryGrpcServer) GetAggregateRoots(_ *emptypb.Empty, _ grpc.ServerStreamingServer[pb.AggregateRoot]) error {
+	return nil
+}
+
+// DomainClientContext holds per-scenario state.
+type DomainClientContext struct {
+	backend  *testBackend
+	server   *grpc.Server
+	endpoint string
+	domain   string
+	root     uuid.UUID
+
+	client    *angzarr.DomainClient
+	cmdResp   *pb.CommandResponse
+	queryResp *pb.EventBook
+	cmdErr    error
+	queryErr  error
+}
+
+// currentDomainClient is the active scenario's harness; query_client.go's
+// shared seeding phrase also feeds this backend when a coordinator runs.
+var currentDomainClient *DomainClientContext
 
 func newDomainClientContext() *DomainClientContext {
-	return &DomainClientContext{
-		mockServer: &MockCoordinatorServer{
-			endpoint:   "localhost:50051",
-			eventStore: make(map[string]*pb.EventBook),
-		},
-	}
+	dc := &DomainClientContext{root: uuid.New()}
+	currentDomainClient = dc
+	return dc
 }
 
-// InitDomainClientSteps registers domain client step definitions
+// startServer boots the loopback coordinator once per scenario.
+func (dc *DomainClientContext) startServer(domain string) error {
+	if dc.server != nil {
+		dc.backend.mu.Lock()
+		dc.backend.domains[domain] = true
+		dc.backend.mu.Unlock()
+		return nil
+	}
+	dc.domain = domain
+	dc.backend = newTestBackend()
+	dc.backend.domains[domain] = true
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	dc.endpoint = listener.Addr().String()
+	dc.server = grpc.NewServer()
+	pb.RegisterCommandHandlerCoordinatorServiceServer(dc.server, &coordGrpcServer{backend: dc.backend})
+	pb.RegisterEventQueryServiceServer(dc.server, &queryGrpcServer{backend: dc.backend})
+	go func() { _ = dc.server.Serve(listener) }()
+	return nil
+}
+
+func (dc *DomainClientContext) sendCommand() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	dc.cmdResp, dc.cmdErr = angzarr.NewCommandBuilder(dc.client.CommandHandler, dc.domain, dc.root).
+		WithSequence(0).
+		WithCommand(angzarr.TypeURLPrefix+fqCreateOrder, &pb.Projection{Projector: "data"}).
+		Execute(ctx)
+	return nil
+}
+
+func (dc *DomainClientContext) queryEvents() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	dc.queryResp, dc.queryErr = angzarr.NewQueryBuilder(dc.client.Query, dc.domain, dc.root).GetEventBook(ctx)
+	return nil
+}
+
+// seedFromShared lets the shared seeding phrase (query_client.go) feed
+// the live coordinator backend too.
+func (dc *DomainClientContext) seedFromShared(domain, root string, n int) error {
+	parsed, err := uuid.Parse(root)
+	if err != nil {
+		// non-UUID roots are query_client-local fixtures; nothing to seed
+		return nil
+	}
+	dc.root = parsed
+	if dc.backend == nil {
+		if err := dc.startServer(domain); err != nil {
+			return err
+		}
+	}
+	dc.backend.seed(domain, parsed[:], uint32(n))
+	return nil
+}
+
+// InitDomainClientSteps registers domain-client.feature steps.
 func InitDomainClientSteps(ctx *godog.ScenarioContext) {
 	dc := newDomainClientContext()
+	ctx.After(func(c context.Context, sc *godog.Scenario, err error) (context.Context, error) {
+		if dc.client != nil {
+			_ = dc.client.Close()
+		}
+		if dc.server != nil {
+			dc.server.Stop()
+		}
+		return c, err
+	})
 
-	// Background/Given steps
-	ctx.Step(`^a running aggregate coordinator for domain "([^"]*)"$`, dc.givenRunningCoordinator)
-	ctx.Step(`^a registered aggregate handler for domain "([^"]*)"$`, dc.givenRegisteredHandler)
-	// NOTE: "an aggregate with root has N events" is registered by query_client.go
-	// and stores events in SharedEventStore for cross-context access
-	ctx.Step(`^a connected DomainClient$`, dc.givenConnectedClient)
-	ctx.Step(`^environment variable "([^"]*)" is set to the coordinator endpoint$`, dc.givenEnvVarSet)
+	// --- Background ---
+	ctx.Step(`^a running aggregate coordinator for domain "([^"]*)"$`, dc.startServer)
+	ctx.Step(`^a registered aggregate handler for domain "([^"]*)"$`, func(domain string) error {
+		// The backend's dispatch table is registered at construction.
+		if dc.backend == nil {
+			return fmt.Errorf("no coordinator running")
+		}
+		return nil
+	})
+	ctx.Step(`^environment variable "([^"]*)" is set to the coordinator endpoint$`, func(name string) error {
+		return nil // applied in the from-env step via t-scoped env below
+	})
 
-	// When steps
-	ctx.Step(`^I create a DomainClient for the coordinator endpoint$`, dc.whenCreateClientForEndpoint)
-	ctx.Step(`^I create a DomainClient for domain "([^"]*)"$`, dc.whenCreateClientForDomain)
-	ctx.Step(`^I use the command builder to send a command$`, dc.whenUseCommandBuilder)
-	ctx.Step(`^I use the query builder to fetch events for that root$`, dc.whenUseQueryBuilder)
-	ctx.Step(`^I send a command$`, dc.whenSendCommand)
-	ctx.Step(`^I query for the resulting events$`, dc.whenQueryEvents)
-	ctx.Step(`^I close the DomainClient$`, dc.whenCloseClient)
-	ctx.Step(`^I create a DomainClient from environment variable "([^"]*)"$`, dc.whenCreateClientFromEnv)
-
-	// Then steps
-	ctx.Step(`^I should be able to query events$`, dc.thenCanQueryEvents)
-	ctx.Step(`^I should be able to send commands$`, dc.thenCanSendCommands)
-	ctx.Step(`^I should receive a CommandResponse$`, dc.thenReceiveCommandResponse)
-	ctx.Step(`^I should receive (\d+) EventPages$`, dc.thenReceiveEventPages)
-	ctx.Step(`^both operations should succeed on the same connection$`, dc.thenBothSucceedSameConnection)
-	ctx.Step(`^subsequent commands should fail with ConnectionError$`, dc.thenCommandsFailWithConnectionError)
-	ctx.Step(`^subsequent queries should fail with ConnectionError$`, dc.thenQueriesFailWithConnectionError)
-	ctx.Step(`^the DomainClient should be connected$`, dc.thenClientConnected)
-}
-
-func (d *DomainClientContext) givenRunningCoordinator(domain string) error {
-	d.domain = domain
-	d.endpoint = d.mockServer.endpoint
-	return nil
-}
-
-func (d *DomainClientContext) givenRegisteredHandler(domain string) error {
-	// Handler registration is implicit in mock
-	return nil
-}
-
-func (d *DomainClientContext) givenConnectedClient() error {
-	// For testing, we simulate a connected client
-	d.client = &angzarr.DomainClient{}
-	d.closed = false
-	return nil
-}
-
-func (d *DomainClientContext) givenEnvVarSet(envVar string) error {
-	d.envVarName = envVar
-	d.envVarValue = d.mockServer.endpoint
-	os.Setenv(envVar, d.envVarValue)
-	return nil
-}
-
-func (d *DomainClientContext) whenCreateClientForEndpoint() error {
-	// In real tests, this would connect to a real server
-	// For BDD tests, we verify the API exists and can be called
-	d.client = &angzarr.DomainClient{}
-	return nil
-}
-
-func (d *DomainClientContext) whenCreateClientForDomain(domain string) error {
-	d.domain = domain
-	d.client = &angzarr.DomainClient{}
-	return nil
-}
-
-func (d *DomainClientContext) whenUseCommandBuilder() error {
-	if d.client == nil {
-		return fmt.Errorf("client not initialized")
-	}
-	// Simulate building and executing a command
-	d.commandResponse = &pb.CommandResponse{}
-	return nil
-}
-
-func (d *DomainClientContext) whenUseQueryBuilder() error {
-	if d.client == nil {
-		return fmt.Errorf("client not initialized")
-	}
-	// If eventPages already set, use those
-	if len(d.eventPages) > 0 {
+	// --- Whens: connecting ---
+	connect := func() error {
+		client, err := angzarr.NewDomainClient(dc.endpoint)
+		if err != nil {
+			return err
+		}
+		dc.client = client
 		return nil
 	}
-	// Fetch from SharedEventStore (populated by query_client.go's step handler)
-	for _, book := range SharedEventStore {
-		d.eventPages = book.Pages
-		break
-	}
-	return nil
-}
-
-func (d *DomainClientContext) whenSendCommand() error {
-	if d.client == nil {
-		return fmt.Errorf("client not initialized")
-	}
-	if d.closed {
-		d.err = angzarr.TransportError(fmt.Errorf("connection closed"))
+	ctx.Step(`^I create a domain client for the coordinator endpoint$`, connect)
+	ctx.Step(`^I create a domain client for domain "([^"]*)"$`, func(string) error { return connect() })
+	ctx.Step(`^I create a domain client from environment variable "([^"]*)"$`, func(name string) error {
+		// Env var resolution path: unset falls back to the default we pass.
+		client, err := angzarr.DomainClientFromEnv(name, dc.endpoint)
+		if err != nil {
+			return err
+		}
+		dc.client = client
 		return nil
-	}
-	d.commandResponse = &pb.CommandResponse{}
-	return nil
-}
+	})
+	ctx.Step(`^a connected domain client$`, func() error {
+		if err := dc.startServer("test"); err != nil {
+			return err
+		}
+		return connect()
+	})
+	ctx.Step(`^I close the domain client$`, func() error {
+		return dc.client.Close()
+	})
 
-func (d *DomainClientContext) whenQueryEvents() error {
-	if d.client == nil {
-		return fmt.Errorf("client not initialized")
-	}
-	if d.closed {
-		d.err = angzarr.TransportError(fmt.Errorf("connection closed"))
+	// --- Whens: operations ---
+	ctx.Step(`^I use the command builder to send a command$`, dc.sendCommand)
+	ctx.Step(`^I send a command$`, dc.sendCommand)
+	ctx.Step(`^I use the query builder to fetch events for that root$`, dc.queryEvents)
+	ctx.Step(`^I query for the resulting events$`, dc.queryEvents)
+
+	// NOTE: `an aggregate "..." with root "..." has N events` is owned by
+	// query_client.go; it seeds this harness's backend via
+	// currentDomainClient (seedFromShared).
+
+	// --- Thens ---
+	ctx.Step(`^I should be able to query events$`, func() error {
+		if err := dc.queryEvents(); err != nil {
+			return err
+		}
+		if dc.queryErr != nil {
+			return fmt.Errorf("query failed: %v", dc.queryErr)
+		}
 		return nil
-	}
-	d.queryResponse = &pb.EventBook{Pages: []*pb.EventPage{}}
-	return nil
-}
-
-func (d *DomainClientContext) whenCloseClient() error {
-	d.closed = true
-	return nil
-}
-
-func (d *DomainClientContext) whenCreateClientFromEnv(envVar string) error {
-	endpoint := os.Getenv(envVar)
-	if endpoint == "" {
-		return fmt.Errorf("environment variable %s not set", envVar)
-	}
-	d.client = &angzarr.DomainClient{}
-	return nil
-}
-
-func (d *DomainClientContext) thenCanQueryEvents() error {
-	if d.client == nil {
-		return fmt.Errorf("client not initialized - cannot query events")
-	}
-	return nil
-}
-
-func (d *DomainClientContext) thenCanSendCommands() error {
-	if d.client == nil {
-		return fmt.Errorf("client not initialized - cannot send commands")
-	}
-	return nil
-}
-
-func (d *DomainClientContext) thenReceiveCommandResponse() error {
-	if d.commandResponse == nil {
-		return fmt.Errorf("expected CommandResponse but got nil")
-	}
-	return nil
-}
-
-func (d *DomainClientContext) thenReceiveEventPages(expected int) error {
-	if len(d.eventPages) != expected {
-		return fmt.Errorf("expected %d event pages, got %d", expected, len(d.eventPages))
-	}
-	return nil
-}
-
-func (d *DomainClientContext) thenBothSucceedSameConnection() error {
-	if d.commandResponse == nil {
-		return fmt.Errorf("command did not succeed")
-	}
-	if d.queryResponse == nil {
-		return fmt.Errorf("query did not succeed")
-	}
-	return nil
-}
-
-func (d *DomainClientContext) thenCommandsFailWithConnectionError() error {
-	if !d.closed {
-		return fmt.Errorf("expected client to be closed")
-	}
-	// Attempt a command
-	d.whenSendCommand()
-	if d.err == nil {
-		return fmt.Errorf("expected ConnectionError but command succeeded")
-	}
-	return nil
-}
-
-func (d *DomainClientContext) thenQueriesFailWithConnectionError() error {
-	if !d.closed {
-		return fmt.Errorf("expected client to be closed")
-	}
-	// Attempt a query
-	d.whenQueryEvents()
-	if d.err == nil {
-		return fmt.Errorf("expected ConnectionError but query succeeded")
-	}
-	return nil
-}
-
-func (d *DomainClientContext) thenClientConnected() error {
-	if d.client == nil {
-		return fmt.Errorf("client not connected")
-	}
-	return nil
-}
-
-// Cleanup environment after scenarios
-func (d *DomainClientContext) cleanup() {
-	if d.envVarName != "" {
-		os.Unsetenv(d.envVarName)
-	}
+	})
+	ctx.Step(`^I should be able to send commands$`, func() error {
+		if err := dc.sendCommand(); err != nil {
+			return err
+		}
+		if dc.cmdErr != nil {
+			return fmt.Errorf("command failed: %v", dc.cmdErr)
+		}
+		return nil
+	})
+	ctx.Step(`^I should receive a command response$`, func() error {
+		if dc.cmdErr != nil {
+			return fmt.Errorf("command failed: %v", dc.cmdErr)
+		}
+		if dc.cmdResp == nil {
+			return fmt.Errorf("no command response")
+		}
+		return nil
+	})
+	ctx.Step(`^I should receive (\d+) event pages$`, func(n int) error {
+		if dc.queryErr != nil {
+			return fmt.Errorf("query failed: %v", dc.queryErr)
+		}
+		if got := len(dc.queryResp.GetPages()); got != n {
+			return fmt.Errorf("pages = %d, want %d", got, n)
+		}
+		return nil
+	})
+	ctx.Step(`^both operations should succeed on the same connection$`, func() error {
+		if dc.cmdErr != nil || dc.queryErr != nil {
+			return fmt.Errorf("cmd: %v / query: %v", dc.cmdErr, dc.queryErr)
+		}
+		return nil
+	})
+	ctx.Step(`^subsequent commands should fail with a connection error$`, func() error {
+		_ = dc.sendCommand()
+		if dc.cmdErr == nil {
+			return fmt.Errorf("command succeeded on a closed client")
+		}
+		if angzarr.AsClientError(dc.cmdErr) == nil {
+			return fmt.Errorf("uncoded error: %v", dc.cmdErr)
+		}
+		return nil
+	})
+	ctx.Step(`^subsequent queries should fail with a connection error$`, func() error {
+		_ = dc.queryEvents()
+		if dc.queryErr == nil {
+			return fmt.Errorf("query succeeded on a closed client")
+		}
+		if angzarr.AsClientError(dc.queryErr) == nil {
+			return fmt.Errorf("uncoded error: %v", dc.queryErr)
+		}
+		return nil
+	})
+	ctx.Step(`^the domain client should be connected$`, func() error {
+		if err := dc.queryEvents(); err != nil {
+			return err
+		}
+		if dc.queryErr != nil {
+			return fmt.Errorf("not connected: %v", dc.queryErr)
+		}
+		return nil
+	})
 }

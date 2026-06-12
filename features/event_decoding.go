@@ -139,7 +139,7 @@ func (d *DecodeContext) givenEventTypeURL(typeURL string) error {
 }
 
 func (d *DecodeContext) givenValidProtoBytes() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (d *DecodeContext) givenEventSuffix(suffix string) error {
@@ -206,7 +206,7 @@ func (d *DecodeContext) givenEmptyAny() error {
 }
 
 func (d *DecodeContext) givenDecodeFunction() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (d *DecodeContext) givenResponseWithEvents() error {
@@ -334,7 +334,7 @@ func (d *DecodeContext) whenDecodeEach() error {
 }
 
 func (d *DecodeContext) whenDecodeByType() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (d *DecodeContext) whenFilterEvents(eventType string) error {
@@ -365,7 +365,7 @@ func (d *DecodeContext) thenGetOrderCreated() error {
 }
 
 func (d *DecodeContext) thenPrefixIgnored() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (d *DecodeContext) thenDecodeNone() error {
@@ -403,7 +403,7 @@ func (d *DecodeContext) thenValidTimestamp() error {
 }
 
 func (d *DecodeContext) thenTimestampParseable() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (d *DecodeContext) thenEventVariant() error {
@@ -480,7 +480,7 @@ func (d *DecodeContext) thenDeserializeCorrect() error {
 }
 
 func (d *DecodeContext) thenFieldsPopulated() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (d *DecodeContext) thenDefaultValues() error {
@@ -498,15 +498,15 @@ func (d *DecodeContext) thenNoErrorEmpty() error {
 }
 
 func (d *DecodeContext) thenDecodeFail() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (d *DecodeContext) thenDeserError() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (d *DecodeContext) thenNoCrash() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (d *DecodeContext) thenDefaultMessage() error {
@@ -545,19 +545,19 @@ func (d *DecodeContext) thenAllDecode(count int) error {
 }
 
 func (d *DecodeContext) thenCorrectData() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (d *DecodeContext) thenOrderDecodes() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (d *DecodeContext) thenItemDecodes() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (d *DecodeContext) thenShippedDecodes() error {
-	return nil
+	return godog.ErrPending
 }
 
 func (d *DecodeContext) thenGetCount(count int) error {
