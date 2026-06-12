@@ -86,6 +86,59 @@ func TestUpcasterRouter_Upcast_PassesThrough(t *testing.T) {
 	}
 }
 
+// Chained dispatch (C-0136): the output of one upcaster is the input of
+// the next, in registration order, so schema evolution composes across
+// versions without each upcaster knowing about every newer version.
+func TestUpcasterRouter_Upcast_ChainsAcrossVersions(t *testing.T) {
+	router := NewUpcasterRouter("player").
+		On("test.EventV1", func(old *anypb.Any) *anypb.Any {
+			return &anypb.Any{TypeUrl: "type.googleapis.com/test.EventV2"}
+		}).
+		On("test.EventV2", func(old *anypb.Any) *anypb.Any {
+			return &anypb.Any{TypeUrl: "type.googleapis.com/test.EventV3"}
+		})
+
+	result := router.Upcast([]*pb.EventPage{
+		{Payload: &pb.EventPage_Event{Event: &anypb.Any{
+			TypeUrl: "type.googleapis.com/test.EventV1",
+		}}},
+	})
+
+	if len(result) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result))
+	}
+	got := result[0].GetEvent().GetTypeUrl()
+	if got != "type.googleapis.com/test.EventV3" {
+		t.Errorf("expected chained upcast to V3, got %q", got)
+	}
+}
+
+// Chain termination (C-0137): the chain stops when no registered upcaster
+// matches the current event type.
+func TestUpcasterRouter_Upcast_ChainStopsWhenNoMatch(t *testing.T) {
+	router := NewUpcasterRouter("player").
+		On("test.EventV1", func(old *anypb.Any) *anypb.Any {
+			return &anypb.Any{TypeUrl: "type.googleapis.com/test.EventV2"}
+		}).
+		On("test.EventV3", func(old *anypb.Any) *anypb.Any {
+			return &anypb.Any{TypeUrl: "type.googleapis.com/test.EventV4"}
+		})
+
+	result := router.Upcast([]*pb.EventPage{
+		{Payload: &pb.EventPage_Event{Event: &anypb.Any{
+			TypeUrl: "type.googleapis.com/test.EventV1",
+		}}},
+	})
+
+	if len(result) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result))
+	}
+	got := result[0].GetEvent().GetTypeUrl()
+	if got != "type.googleapis.com/test.EventV2" {
+		t.Errorf("expected chain to stop at V2 (no V2 upcaster registered), got %q", got)
+	}
+}
+
 func TestUpcasterRouter_Upcast_EmptyInput(t *testing.T) {
 	router := NewUpcasterRouter("order")
 	result := router.Upcast([]*pb.EventPage{})

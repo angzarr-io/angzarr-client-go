@@ -51,8 +51,11 @@ func (r *UpcasterRouter) On(fullName string, handler UpcasterHandler) *UpcasterR
 
 // Upcast transforms a list of events to current versions.
 //
-// Events matching registered handlers are transformed.
-// Events without matching handlers pass through unchanged.
+// Dispatch is chained (C-0136/C-0137): every matching upcaster applies in
+// registration order, the output of one feeding the next, so schema
+// evolution composes across versions (V1 → V2 → V3). The chain stops when
+// no later registration matches the current event type. Events with no
+// matching handlers pass through unchanged.
 func (r *UpcasterRouter) Upcast(events []*pb.EventPage) []*pb.EventPage {
 	result := make([]*pb.EventPage, 0, len(events))
 
@@ -66,19 +69,18 @@ func (r *UpcasterRouter) Upcast(events []*pb.EventPage) []*pb.EventPage {
 		transformed := false
 		for _, entry := range r.handlers {
 			if event.TypeUrl == TypeURLPrefix+entry.fullName {
-				newEvent := entry.handler(event)
-				// Clone the page and replace the event
-				newPage := proto.Clone(page).(*pb.EventPage)
-				newPage.Payload = &pb.EventPage_Event{Event: newEvent}
-				result = append(result, newPage)
+				event = entry.handler(event)
 				transformed = true
-				break
 			}
 		}
 
 		if !transformed {
 			result = append(result, page)
+			continue
 		}
+		newPage := proto.Clone(page).(*pb.EventPage)
+		newPage.Payload = &pb.EventPage_Event{Event: event}
+		result = append(result, newPage)
 	}
 
 	return result
