@@ -4,6 +4,17 @@
 
 Go client library for Angzarr event sourcing framework.
 
+## Architecture
+
+This library has exactly one dispatch surface: proto-declared
+components, generated into strict typed seams by the shared
+[angzarr CLI](https://github.com/angzarr-io/angzarr-cli), executed by
+one hand-written engine. See
+[docs/architecture.md](docs/architecture.md) — the single client
+router's architecture of record, including the engine's cross-language
+semantic contracts and the porting playbook for the other client
+languages.
+
 ## Installation
 
 ```bash
