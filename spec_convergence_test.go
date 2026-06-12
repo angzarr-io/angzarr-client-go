@@ -47,7 +47,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/anypb"
 )
 
 // ============================================================================
@@ -525,202 +524,8 @@ func TestRootFromCover_Nil(t *testing.T) {
 }
 
 // ============================================================================
-// HIGH-4.1 — Router aggregator
+// HIGH-4.1 — Router composition (engine RouterBuilder; see engine_test.go)
 // ============================================================================
-
-func TestRouter_Build_EmptyRaisesROUTER_NO_HANDLERS(t *testing.T) {
-	_, err := NewRouter("r1").Build()
-	if err == nil {
-		t.Fatal("expected error for empty router")
-	}
-	ce := AsClientError(err)
-	if ce == nil {
-		t.Fatalf("want ClientError, got %T", err)
-	}
-	if ce.Code != CodeRouterNoHandlers {
-		t.Errorf("code = %q, want %q", ce.Code, CodeRouterNoHandlers)
-	}
-	if ce.Extras[ExtraKeyRouterName] != "r1" {
-		t.Errorf("router_name detail missing: %v", ce.Extras)
-	}
-}
-
-type dummyState struct{}
-
-type dummyCHHandler struct{ types []string }
-
-func (h *dummyCHHandler) CommandTypes() []string                { return h.types }
-func (h *dummyCHHandler) StateRouter() *StateRouter[dummyState] { return nil }
-func (h *dummyCHHandler) Rebuild(_ *pb.EventBook) dummyState    { return dummyState{} }
-func (h *dummyCHHandler) HandleFact(_ *pb.EventBook, _ dummyState) (*pb.EventBook, error) {
-	return nil, nil
-}
-func (h *dummyCHHandler) Handle(_ *pb.CommandBook, _ *anypb.Any, _ dummyState, _ uint32) (*pb.EventBook, error) {
-	return nil, nil
-}
-func (h *dummyCHHandler) OnRejected(_ *pb.Notification, _ dummyState, _, _ string) (*RejectionHandlerResponse, error) {
-	return nil, nil
-}
-
-func TestRouter_Build_DuplicateCH_Raises(t *testing.T) {
-	r1 := NewCommandHandlerRouter[dummyState]("r-a", "player", &dummyCHHandler{types: []string{"examples.X"}})
-	r2 := NewCommandHandlerRouter[dummyState]("r-b", "player", &dummyCHHandler{types: []string{"examples.X"}})
-	_, err := NewRouter("agg").AddCommandHandler(r1).AddCommandHandler(r2).Build()
-	if err == nil {
-		t.Fatal("expected duplicate-CH error")
-	}
-	ce := AsClientError(err)
-	if ce == nil || ce.Code != CodeDuplicateCommandHandler {
-		t.Errorf("want code %q, got %v", CodeDuplicateCommandHandler, ce)
-	}
-}
-
-type dummySagaHandler struct{}
-
-func (h *dummySagaHandler) EventTypes() []string { return []string{"examples.E"} }
-func (h *dummySagaHandler) Execute(_ *pb.EventBook, _ *anypb.Any, _ *Destinations) (*SagaHandlerResponse, error) {
-	return nil, nil
-}
-func (h *dummySagaHandler) OnRejected(_ *pb.Notification, _, _ string) (*RejectionHandlerResponse, error) {
-	return nil, nil
-}
-
-func TestRouter_Build_MixedKinds_Raises(t *testing.T) {
-	chR := NewCommandHandlerRouter[dummyState]("ch", "d1", &dummyCHHandler{types: []string{"X"}})
-	sagaR := NewSagaRouter("s", "d1", "d2", &dummySagaHandler{})
-	_, err := NewRouter("mix").AddCommandHandler(chR).AddSaga(sagaR).Build()
-	if err == nil {
-		t.Fatal("expected mixed-kinds error")
-	}
-	ce := AsClientError(err)
-	if ce == nil || ce.Code != CodeMixedHandlerKinds {
-		t.Errorf("want code %q, got %v", CodeMixedHandlerKinds, ce)
-	}
-}
-
-func TestRouter_Build_DifferentDomainsSameCmd_Allowed(t *testing.T) {
-	// Spec §4 (DUPLICATE_COMMAND_HANDLER scope C-0011): different domains
-	// may register the same command type — it's only a duplicate when
-	// (domain, type_url) collide.
-	a := NewCommandHandlerRouter[dummyState]("ch-a", "player", &dummyCHHandler{types: []string{"examples.X"}})
-	b := NewCommandHandlerRouter[dummyState]("ch-b", "order", &dummyCHHandler{types: []string{"examples.X"}})
-	_, err := NewRouter("ok").AddCommandHandler(a).AddCommandHandler(b).Build()
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestBuilt_HandlerCount(t *testing.T) {
-	r := NewCommandHandlerRouter[dummyState]("ch", "d", &dummyCHHandler{types: []string{"X", "Y"}})
-	built, err := NewRouter("agg").AddCommandHandler(r).Build()
-	if err != nil {
-		t.Fatalf("build failed: %v", err)
-	}
-	if built.HandlerCount() != 1 {
-		t.Errorf("HandlerCount = %d, want 1", built.HandlerCount())
-	}
-}
-
-func TestBuilt_Kind(t *testing.T) {
-	r := NewCommandHandlerRouter[dummyState]("ch", "d", &dummyCHHandler{types: []string{"X"}})
-	built, err := NewRouter("agg").AddCommandHandler(r).Build()
-	if err != nil {
-		t.Fatalf("build failed: %v", err)
-	}
-	if built.Kind() != KindCommandHandler {
-		t.Errorf("kind = %v, want %v", built.Kind(), KindCommandHandler)
-	}
-}
-
-func TestBuilt_OutputDomains_CH_Empty(t *testing.T) {
-	r := NewCommandHandlerRouter[dummyState]("ch", "player", &dummyCHHandler{types: []string{"X"}})
-	built, _ := NewRouter("agg").AddCommandHandler(r).Build()
-	if domains := built.OutputDomains(); len(domains) != 0 {
-		t.Errorf("CH OutputDomains should be empty, got %v", domains)
-	}
-}
-
-func TestBuilt_OutputDomains_Saga(t *testing.T) {
-	r := NewSagaRouter("saga", "source", "target", &dummySagaHandler{})
-	built, _ := NewRouter("agg").AddSaga(r).Build()
-	domains := built.OutputDomains()
-	if len(domains) != 1 || domains[0] != "target" {
-		t.Errorf("saga OutputDomains = %v, want [target]", domains)
-	}
-}
-
-func TestBuilt_HasAsyncOutputs_CH(t *testing.T) {
-	r := NewCommandHandlerRouter[dummyState]("ch", "d", &dummyCHHandler{types: []string{"X"}})
-	built, _ := NewRouter("agg").AddCommandHandler(r).Build()
-	if built.HasAsyncOutputs() {
-		t.Errorf("CH should have no async outputs")
-	}
-}
-
-func TestBuilt_HasAsyncOutputs_Saga(t *testing.T) {
-	r := NewSagaRouter("saga", "src", "tgt", &dummySagaHandler{})
-	built, _ := NewRouter("agg").AddSaga(r).Build()
-	if !built.HasAsyncOutputs() {
-		t.Error("saga should have async outputs by default")
-	}
-}
-
-func TestBuilt_RouterName_Roundtrips(t *testing.T) {
-	r := NewCommandHandlerRouter[dummyState]("ch", "d", &dummyCHHandler{types: []string{"X"}})
-	built, _ := NewRouter("my-router-42").AddCommandHandler(r).Build()
-	if built.RouterName() != "my-router-42" {
-		t.Errorf("name = %q, want %q", built.RouterName(), "my-router-42")
-	}
-}
-
-func TestBuilt_SyncOutputDomains_DefaultsToOutput(t *testing.T) {
-	r := NewSagaRouter("saga", "src", "tgt", &dummySagaHandler{})
-	built, _ := NewRouter("agg").AddSaga(r).Build()
-	if got := built.SyncOutputDomains(); len(got) != 1 || got[0] != "tgt" {
-		t.Errorf("SyncOutputDomains = %v, want [tgt]", got)
-	}
-}
-
-func TestKind_StringConversions(t *testing.T) {
-	cases := map[Kind]string{
-		KindCommandHandler: "command_handler",
-		KindSaga:           "saga",
-		KindProcessManager: "process_manager",
-		KindProjector:      "projector",
-		KindUpcaster:       "upcaster",
-		KindUnknown:        "unknown",
-	}
-	for k, want := range cases {
-		if got := k.String(); got != want {
-			t.Errorf("Kind(%d).String() = %q, want %q", k, got, want)
-		}
-	}
-}
-
-func TestRouter_AddProjector_Built(t *testing.T) {
-	r := NewProjectorRouter("p1")
-	built, err := NewRouter("agg").AddProjector(r).Build()
-	if err != nil {
-		t.Fatalf("build: %v", err)
-	}
-	if built.Kind() != KindProjector {
-		t.Errorf("kind = %v, want %v", built.Kind(), KindProjector)
-	}
-	if built.HandlerCount() != 1 {
-		t.Errorf("count = %d, want 1", built.HandlerCount())
-	}
-}
-
-func TestRouter_AddProcessManager_Built(t *testing.T) {
-	pm := NewProcessManagerRouter[dummyState]("pm1", "pmDomain", func(_ *pb.EventBook) dummyState { return dummyState{} })
-	built, err := AddProcessManager(NewRouter("agg"), pm).Build()
-	if err != nil {
-		t.Fatalf("build: %v", err)
-	}
-	if built.Kind() != KindProcessManager {
-		t.Errorf("kind = %v, want %v", built.Kind(), KindProcessManager)
-	}
-}
 
 // ============================================================================
 // HIGH-4.3 — BuildError convenience
@@ -743,17 +548,6 @@ func TestNewBuildError_Stamps(t *testing.T) {
 // ============================================================================
 // HIGH-4.4 — UpcasterRouter recognized by Router aggregator
 // ============================================================================
-
-func TestRouter_AddUpcaster_Built(t *testing.T) {
-	u := NewUpcasterRouter("order").On("OrderCreatedV1", func(old *anypb.Any) *anypb.Any { return old })
-	built, err := NewRouter("agg").AddUpcaster(u).Build()
-	if err != nil {
-		t.Fatalf("build err: %v", err)
-	}
-	if built.Kind() != KindUpcaster {
-		t.Errorf("kind = %v, want %v", built.Kind(), KindUpcaster)
-	}
-}
 
 // ============================================================================
 // MED-4.5 — Notification routing uses exact match
@@ -860,16 +654,11 @@ func TestPerKindRunners_Exported(t *testing.T) {
 	//
 	// These predate D-Go but satisfy HIGH-5.4: every kind has a per-kind
 	// runner.
-	_ = RunCommandHandlerServer[any]
-	_ = RunSagaServer
-	_ = RunProcessManagerServer
-	_ = RunProjectorServer
+	_ = RunAggregateDispatchServer[any]
+	_ = RunSagaDispatchServer
+	_ = RunProcessManagerDispatchServer[any]
+	_ = RunProjectorDispatchServer[any]
 	_ = RunUpcasterServer
-	// Trait-router variants:
-	_ = RunTraitCommandHandlerServer[any]
-	_ = RunTraitSagaServer
-	_ = RunTraitProcessManagerServer[any]
-	_ = RunTraitProjectorServer
 	// Per-kind health-name constants (audit #74):
 	_ = HealthNameCommandHandler
 	_ = HealthNameSaga
@@ -900,33 +689,14 @@ func TestCreateServer_StartsNotServing(t *testing.T) {
 	if healthSrv == nil {
 		t.Fatal("readiness health server is nil")
 	}
-	if got := healthSrv.GetStatus(""); got != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
-		t.Errorf("default service status = %v, want NOT_SERVING (HIGH-5.5)", got)
-	}
-	if got := healthSrv.GetStatus("test"); got != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
-		t.Errorf("named service status = %v, want NOT_SERVING", got)
-	}
-}
-
-// ============================================================================
-// Readiness health server — direct accessor coverage (mutation-kill)
-// ============================================================================
-
-func TestReadinessHealthServer_GetStatus_DefaultNotServing(t *testing.T) {
-	h := NewReadinessHealthServer()
-	if got := h.GetStatus("anything"); got != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
-		t.Errorf("got %v, want NOT_SERVING", got)
-	}
-}
-
-func TestReadinessHealthServer_GetStatus_AfterSet(t *testing.T) {
-	h := NewReadinessHealthServer()
-	h.SetServingStatus("svc-a", grpc_health_v1.HealthCheckResponse_SERVING)
-	if got := h.GetStatus("svc-a"); got != grpc_health_v1.HealthCheckResponse_SERVING {
-		t.Errorf("got %v, want SERVING", got)
-	}
-	if got := h.GetStatus("svc-b"); got != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
-		t.Errorf("unrelated service: got %v, want NOT_SERVING", got)
+	for _, name := range []string{"", "test"} {
+		resp, err := healthSrv.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{Service: name})
+		if err != nil {
+			t.Fatalf("Check(%q): %v", name, err)
+		}
+		if resp.Status != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
+			t.Errorf("Check(%q) = %v, want NOT_SERVING (HIGH-5.5)", name, resp.Status)
+		}
 	}
 }
 

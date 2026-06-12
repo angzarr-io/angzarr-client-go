@@ -33,10 +33,11 @@
 package angzarr
 
 import (
+	"context"
 	"reflect"
-	"strings"
 
 	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
+	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
@@ -150,27 +151,6 @@ func (r *CloudEventsRouter) On(handler any) *CloudEventsRouter {
 	return r
 }
 
-// OnSuffix registers a CloudEvents handler for an event type suffix.
-//
-// Use this when you want to match by suffix instead of full type name.
-//
-// Example:
-//
-//	router.OnSuffix("PlayerRegistered", func(eventAny *anypb.Any) *pb.CloudEvent {
-//	    event := &examples.PlayerRegistered{}
-//	    eventAny.UnmarshalTo(event)
-//	    // ... transform and return CloudEvent
-//	})
-func (r *CloudEventsRouter) OnSuffix(suffix string, handler func(*anypb.Any) *pb.CloudEvent) *CloudEventsRouter {
-	wrapper := func(data []byte) *pb.CloudEvent {
-		// Reconstruct the Any for the handler
-		eventAny := &anypb.Any{Value: data}
-		return handler(eventAny)
-	}
-	r.handlers[suffix] = wrapper
-	return r
-}
-
 // Project processes an EventBook and returns CloudEvents.
 func (r *CloudEventsRouter) Project(source *pb.EventBook) *pb.CloudEventsResponse {
 	if source == nil {
@@ -187,29 +167,16 @@ func (r *CloudEventsRouter) Project(source *pb.EventBook) *pb.CloudEventsRespons
 
 		typeURL := event.TypeUrl
 
-		// Try exact match first (full type name)
+		// MED-4.5 / audit #25: exact type-URL match only. Suffix
+		// matching was removed — event-type lists derive exactly from
+		// proto declarations, so a "family of types" need is an explicit
+		// list of exact registrations, not a runtime suffix probe.
 		for fullName, handler := range r.handlers {
 			if typeURL == TypeURLPrefix+fullName {
 				if ce := handler(event.Value); ce != nil {
 					events = append(events, ce)
 				}
 				break
-			}
-		}
-
-		// Fall back to suffix matching
-		suffix := typeURL
-		if idx := strings.LastIndex(typeURL, "/"); idx >= 0 {
-			suffix = typeURL[idx+1:]
-		}
-		// Extract simple name from qualified name (e.g., "examples.PlayerRegistered" -> "PlayerRegistered")
-		if idx := strings.LastIndex(suffix, "."); idx >= 0 {
-			suffix = suffix[idx+1:]
-		}
-
-		if handler, ok := r.handlers[suffix]; ok {
-			if ce := handler(event.Value); ce != nil {
-				events = append(events, ce)
 			}
 		}
 	}
@@ -280,11 +247,6 @@ func (p *CloudEventsProjectorBase) On(handler any) {
 	p.router.On(handler)
 }
 
-// OnSuffix registers a CloudEvents handler by suffix. See CloudEventsRouter.OnSuffix for details.
-func (p *CloudEventsProjectorBase) OnSuffix(suffix string, handler func(*anypb.Any) *pb.CloudEvent) {
-	p.router.OnSuffix(suffix, handler)
-}
-
 // Project processes an EventBook and returns CloudEvents.
 func (p *CloudEventsProjectorBase) Project(source *pb.EventBook) *pb.CloudEventsResponse {
 	return p.router.Project(source)
@@ -307,26 +269,42 @@ func (p *CloudEventsProjectorBase) Handle(source *pb.EventBook) (*pb.Projection,
 	}, nil
 }
 
+// cloudEventsGrpcHandler adapts a project function to the Projector service.
+type cloudEventsGrpcHandler struct {
+	pb.UnimplementedProjectorServiceServer
+	project func(*pb.EventBook) (*pb.Projection, error)
+}
+
+func (h *cloudEventsGrpcHandler) Handle(_ context.Context, events *pb.EventBook) (*pb.Projection, error) {
+	return h.project(events)
+}
+
+func (h *cloudEventsGrpcHandler) HandleSpeculative(ctx context.Context, events *pb.EventBook) (*pb.Projection, error) {
+	return h.Handle(ctx, events)
+}
+
 // RunCloudEventsProjectorServer runs a gRPC projector server using the CloudEvents router.
 func RunCloudEventsProjectorServer(name, port string, router *CloudEventsRouter) {
-	handler := NewProjectorHandler(name, router.InputDomain()).
-		WithHandle(func(source *pb.EventBook) (*pb.Projection, error) {
-			response := router.Project(source)
-			projectionAny, err := anypb.New(response)
-			if err != nil {
-				return nil, err
-			}
-			return &pb.Projection{
-				Projector:  router.Name(),
-				Projection: projectionAny,
-			}, nil
-		})
-	RunProjectorServer(name, port, handler)
+	handler := &cloudEventsGrpcHandler{project: func(source *pb.EventBook) (*pb.Projection, error) {
+		response := router.Project(source)
+		projectionAny, err := anypb.New(response)
+		if err != nil {
+			return nil, err
+		}
+		return &pb.Projection{
+			Projector:  router.Name(),
+			Projection: projectionAny,
+		}, nil
+	}}
+	RunServer(func(server *grpc.Server) {
+		pb.RegisterProjectorServiceServer(server, handler)
+	}, ServerOptions{ServiceName: "Projector", Domain: name, DefaultPort: port, EnableReflection: true})
 }
 
 // RunOOCloudEventsProjectorServer runs a gRPC projector server using the OO CloudEvents projector.
 func RunOOCloudEventsProjectorServer(name, port string, projector *CloudEventsProjectorBase) {
-	handler := NewProjectorHandler(name, projector.InputDomain()).
-		WithHandle(projector.Handle)
-	RunProjectorServer(name, port, handler)
+	handler := &cloudEventsGrpcHandler{project: projector.Handle}
+	RunServer(func(server *grpc.Server) {
+		pb.RegisterProjectorServiceServer(server, handler)
+	}, ServerOptions{ServiceName: "Projector", Domain: name, DefaultPort: port, EnableReflection: true})
 }

@@ -4,6 +4,7 @@ package angzarr
 import (
 	"errors"
 
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -107,9 +108,22 @@ func TransportError(err error) *ClientError {
 	return &ClientError{Kind: ErrTransport, Message: "transport error", Cause: err}
 }
 
-// GRPCError wraps a gRPC error.
+// GRPCError wraps a gRPC error. When the status carries a
+// google.rpc.ErrorInfo detail (attached server-side by mapHandlerError),
+// its Reason/Metadata populate Code/Extras so callers assert on the
+// cross-language code instead of message text.
 func GRPCError(err error) *ClientError {
-	return &ClientError{Kind: ErrGRPC, Message: "grpc error", Cause: err}
+	clientErr := &ClientError{Kind: ErrGRPC, Message: "grpc error", Cause: err}
+	if st, ok := status.FromError(err); ok {
+		for _, d := range st.Details() {
+			if info, ok := d.(*errdetails.ErrorInfo); ok {
+				clientErr.Code = info.Reason
+				clientErr.Extras = info.Metadata
+				break
+			}
+		}
+	}
+	return clientErr
 }
 
 // InvalidArgumentError creates an invalid argument error.
@@ -172,6 +186,12 @@ const (
 	CodeGRPCError                  = "GRPC_ERROR"
 	CodeInvalidTransportMode       = "INVALID_TRANSPORT_MODE"
 	CodeInvalidPort                = "INVALID_PORT"
+	// Set-but-unparseable duration env value (e.g. ANGZARR_SHUTDOWN_DRAIN).
+	// Py/Rs/Ja/Cs/Cpp must mirror this addition to the inventory.
+	CodeInvalidDuration = "INVALID_DURATION"
+	// Event book delivered without a Cover (projector dispatch needs the
+	// domain). Py/Rs/Ja/Cs/Cpp must mirror this addition to the inventory.
+	CodeMissingEventBookCover = "MISSING_EVENT_BOOK_COVER"
 
 	// --- Dispatch --------------------------------------------------------
 	CodeHandlerWrongResponseKind          = "HANDLER_WRONG_RESPONSE_KIND"
@@ -182,6 +202,13 @@ const (
 	CodeMissingCommandPayload             = "MISSING_COMMAND_PAYLOAD"
 	CodeNotificationDecodeFailed          = "NOTIFICATION_DECODE_FAILED"
 	CodeRejectionNotificationDecodeFailed = "REJECTION_NOTIFICATION_DECODE_FAILED"
+	// Store-sourced event payload failed to decode during state rebuild.
+	// Maps to DATA_LOSS (unrecoverable by retry). Py/Rs/Ja/Cs/Cpp must
+	// mirror this addition to the inventory.
+	CodePersistedEventCorrupt = "PERSISTED_EVENT_CORRUPT"
+	// Unclassified error escaped a business handler. Maps to INTERNAL.
+	// Py/Rs/Ja/Cs/Cpp must mirror this addition to the inventory.
+	CodeUnhandledHandlerError = "UNHANDLED_HANDLER_ERROR"
 
 	// --- Saga ------------------------------------------------------------
 	CodeMissingSagaSource                = "MISSING_SAGA_SOURCE"
@@ -258,25 +285,27 @@ const (
 	MessageMissingCommandPayload             = "missing command payload"
 	MessageNotificationDecodeFailed          = "failed to decode Notification payload"
 	MessageRejectionNotificationDecodeFailed = "failed to decode RejectionNotification payload"
-	MessageMissingSagaSource                 = "missing saga source"
-	MessageEmptySagaSource                   = "empty saga source"
-	MessageMissingSagaEventPayload           = "missing event payload"
-	MessageSagaInvalidTypeURL                = "saga trigger has invalid type_url"
-	MessageSagaHandlerUnsupportedReturnType  = "saga handler returned unsupported type"
-	MessageMissingPMTrigger                  = "missing PM trigger"
-	MessageEmptyPMTrigger                    = "empty PM trigger"
-	MessageMissingPMEventPayload             = "missing event payload on PM trigger"
-	MessagePMInvalidTypeURL                  = "PM trigger has invalid type_url"
-	MessagePMHandlerWrongReturnType          = "PM handler must return ProcessManagerResponse"
-	MessageUpcasterWrongResponseKind         = "upcaster handler returned non-Upcaster response"
-	MessageHandlerFieldEmptyString           = "handler field must be a non-empty string"
-	MessageHandlerFieldEmptyList             = "handler field must be a non-empty list"
-	MessageHandlerStateNotType               = "handler 'state' must be a type"
-	MessageHandlerUnknownKind                = "unknown handler kind"
-	MessageRouterNoHandlers                  = "no handlers registered on Router"
-	MessageDuplicateCommandHandler           = "duplicate command handler registration for (domain, type_url)"
-	MessageMixedHandlerKinds                 = "cannot mix handler kinds in one Router — all handlers must share a kind"
-	MessageMissingDestinationSequence        = "no sequence for destination domain"
+	// Py/Rs/Ja/Cs/Cpp must mirror (pairs with PERSISTED_EVENT_CORRUPT).
+	MessagePersistedEventCorrupt            = "persisted event payload corrupt"
+	MessageMissingSagaSource                = "missing saga source"
+	MessageEmptySagaSource                  = "empty saga source"
+	MessageMissingSagaEventPayload          = "missing event payload"
+	MessageSagaInvalidTypeURL               = "saga trigger has invalid type_url"
+	MessageSagaHandlerUnsupportedReturnType = "saga handler returned unsupported type"
+	MessageMissingPMTrigger                 = "missing PM trigger"
+	MessageEmptyPMTrigger                   = "empty PM trigger"
+	MessageMissingPMEventPayload            = "missing event payload on PM trigger"
+	MessagePMInvalidTypeURL                 = "PM trigger has invalid type_url"
+	MessagePMHandlerWrongReturnType         = "PM handler must return ProcessManagerResponse"
+	MessageUpcasterWrongResponseKind        = "upcaster handler returned non-Upcaster response"
+	MessageHandlerFieldEmptyString          = "handler field must be a non-empty string"
+	MessageHandlerFieldEmptyList            = "handler field must be a non-empty list"
+	MessageHandlerStateNotType              = "handler 'state' must be a type"
+	MessageHandlerUnknownKind               = "unknown handler kind"
+	MessageRouterNoHandlers                 = "no handlers registered on Router"
+	MessageDuplicateCommandHandler          = "duplicate command handler registration for (domain, type_url)"
+	MessageMixedHandlerKinds                = "cannot mix handler kinds in one Router — all handlers must share a kind"
+	MessageMissingDestinationSequence       = "no sequence for destination domain"
 
 	// MessageSeatsIdentical mirrors Py/Rs/Ja/C#/Cpp canonical text for the
 	// SEATS_IDENTICAL code (PR #12). See `core/main/.plan/cross-language-spec.md` §1.5.

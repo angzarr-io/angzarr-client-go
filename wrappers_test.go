@@ -547,3 +547,34 @@ func TestCommandResponseW_Events(t *testing.T) {
 		}
 	})
 }
+
+// Wrapper CacheKey methods previously emitted "{domain}:{root_hex}" — missing
+// the edition prefix the canonical helpers.CacheKey carries (audit #75-#86:
+// cross-language cache hits require "{edition}:{domain}:{root_hex}"). These
+// tests pin all three wrappers to the canonical shape.
+func TestWrapperCacheKeys_MatchCanonicalThreePartShape(t *testing.T) {
+	root := &pb.UUID{Value: []byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+		0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00}}
+	cover := &pb.Cover{
+		Domain:  "order",
+		Root:    root,
+		Edition: &pb.Edition{Name: "branch"},
+	}
+	want := CacheKey(cover)
+
+	tests := []struct {
+		name string
+		got  string
+	}{
+		{"CoverW", NewCoverW(cover).CacheKey()},
+		{"EventBookW", NewEventBookW(&pb.EventBook{Cover: cover}).CacheKey()},
+		{"CommandBookW", NewCommandBookW(&pb.CommandBook{Cover: cover}).CacheKey()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != want {
+				t.Fatalf("CacheKey = %q, want canonical %q", tt.got, want)
+			}
+		})
+	}
+}

@@ -28,6 +28,8 @@ package angzarr
 import (
 	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // NotificationTypeName is the fully-qualified proto type name for Notification.
@@ -193,4 +195,68 @@ func PMEmitCompensationEvents(events *pb.EventBook, alsoEmitSystemEvent bool, re
 // IsNotification checks if a command is a rejection Notification.
 func IsNotification(typeURL string) bool {
 	return typeURL == TypeURLPrefix+NotificationTypeName
+}
+
+// --- Compensation builders ---
+//
+// The saga/PM side of the compensation flow: when a downstream aggregate
+// rejects a command, these builders carry the rejected command and its
+// context back to the source aggregate. Mirrors Py/Rs compensation
+// builders; shapes pinned by client/compensation.feature.
+
+// RejectionNotificationFor builds the rejection payload from the rejected
+// command and the rejection reason, preserving the command verbatim for
+// debugging and FQ-keyed compensation dispatch.
+func RejectionNotificationFor(rejectedCommand *pb.CommandBook, reason string) *pb.RejectionNotification {
+	return &pb.RejectionNotification{
+		RejectedCommand: rejectedCommand,
+		RejectionReason: reason,
+	}
+}
+
+// NotificationForRejection wraps a RejectionNotification into a routable
+// Notification: the cover routes back to the SOURCE aggregate (from the
+// rejected command's angzarr_deferred header), the correlation ID is
+// preserved from the rejected command, and sent_at is stamped.
+func NotificationForRejection(rejection *pb.RejectionNotification) (*pb.Notification, error) {
+	payload, err := anypb.New(rejection)
+	if err != nil {
+		return nil, err
+	}
+
+	cover := &pb.Cover{}
+	if cmd := rejection.GetRejectedCommand(); cmd != nil {
+		if len(cmd.Pages) > 0 {
+			if deferred := cmd.Pages[0].GetHeader().GetAngzarrDeferred(); deferred != nil && deferred.Source != nil {
+				cover.Domain = deferred.Source.Domain
+				cover.Root = deferred.Source.Root
+				cover.Edition = deferred.Source.Edition
+			}
+		}
+		if cmd.Cover != nil {
+			cover.CorrelationId = cmd.Cover.CorrelationId
+		}
+	}
+
+	return &pb.Notification{
+		Cover:   cover,
+		Payload: payload,
+		SentAt:  timestamppb.Now(),
+	}, nil
+}
+
+// NotificationCommandBook wraps a Notification as a CommandBook targeting
+// the notification's cover (the source aggregate), so the framework can
+// deliver the compensation signal through the ordinary command channel.
+func NotificationCommandBook(notification *pb.Notification) (*pb.CommandBook, error) {
+	packed, err := anypb.New(notification)
+	if err != nil {
+		return nil, err
+	}
+	return &pb.CommandBook{
+		Cover: notification.Cover,
+		Pages: []*pb.CommandPage{
+			{Payload: &pb.CommandPage_Command{Command: packed}},
+		},
+	}, nil
 }

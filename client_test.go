@@ -2,6 +2,7 @@ package angzarr
 
 import (
 	"context"
+	"io"
 	"os"
 	"testing"
 
@@ -583,3 +584,73 @@ func TestDomainClientFromEnv(t *testing.T) {
 	})
 }
 
+// fakeEventStream feeds a scripted sequence of (event, err) results to
+// GetEvents. Embedding grpc.ClientStream satisfies the streaming client
+// interface; only Recv is exercised.
+type fakeEventStream struct {
+	grpc.ClientStream
+	results []eventStreamResult
+	pos     int
+}
+
+type eventStreamResult struct {
+	event *pb.EventBook
+	err   error
+}
+
+func (s *fakeEventStream) Recv() (*pb.EventBook, error) {
+	if s.pos >= len(s.results) {
+		return nil, io.EOF
+	}
+	r := s.results[s.pos]
+	s.pos++
+	return r.event, r.err
+}
+
+// GetEvents previously swallowed every Recv error (including mid-stream
+// transport failures), silently returning a truncated result set. These
+// tests pin the repaired contract: EOF ends the stream cleanly; any other
+// error surfaces as a ClientError.
+func TestQueryClient_GetEvents_MidStreamError_Surfaces(t *testing.T) {
+	mock := &mockEventQueryServiceClient{
+		getEventsFn: func(ctx context.Context, in *pb.Query, opts ...grpc.CallOption) (pb.EventQueryService_GetEventsClient, error) {
+			return &fakeEventStream{results: []eventStreamResult{
+				{event: &pb.EventBook{}},
+				{err: status.Error(codes.Unavailable, "connection reset")},
+			}}, nil
+		},
+	}
+	client := &QueryClient{inner: mock}
+
+	events, err := client.GetEvents(context.Background(), &pb.Query{})
+	if err == nil {
+		t.Fatalf("mid-stream Recv error was swallowed; got %d events, nil error", len(events))
+	}
+	clientErr := AsClientError(err)
+	if clientErr == nil {
+		t.Fatal("expected ClientError")
+	}
+	if clientErr.Kind != ErrGRPC {
+		t.Errorf("got kind %v, want ErrGRPC", clientErr.Kind)
+	}
+}
+
+func TestQueryClient_GetEvents_EOF_ReturnsCollectedEvents(t *testing.T) {
+	mock := &mockEventQueryServiceClient{
+		getEventsFn: func(ctx context.Context, in *pb.Query, opts ...grpc.CallOption) (pb.EventQueryService_GetEventsClient, error) {
+			return &fakeEventStream{results: []eventStreamResult{
+				{event: &pb.EventBook{}},
+				{event: &pb.EventBook{}},
+			}}, nil
+		},
+	}
+	client := &QueryClient{inner: mock}
+
+	events, err := client.GetEvents(context.Background(), &pb.Query{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2", len(events))
+	}
+}

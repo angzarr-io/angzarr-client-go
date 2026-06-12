@@ -38,39 +38,27 @@ import (
 // a runtime CommandHandlerRouter check that detects duplicate handler
 // registration if it ever sneaks in via a higher-level builder.
 
-func TestMultiHandlerBan_StructuralByConstruction(t *testing.T) {
-	// Go's CommandHandlerRouter has no `Add()` method — the only way
-	// to register a handler is at construction time. This test
-	// documents the contract: NewCommandHandlerRouter takes a single
-	// `handler` argument. If a refactor introduces a multi-handler
-	// API, this test will need to be replaced with a duplicate-
-	// rejection check (see TestMultiHandlerBan_RuntimeCheck below).
-	router := NewCommandHandlerRouter[any]("ch-order", "order", &noopCHHandler{})
-	if router.Name() != "ch-order" {
-		t.Errorf("name mismatch: %q", router.Name())
+// parityCH builds a minimal engine aggregate table for the ban tests.
+func parityCH(name, domain string, types ...string) *AggregateDispatch[*struct{}] {
+	table := NewAggregateDispatch(name, domain, NewRebuilder(func() *struct{} { return &struct{}{} }))
+	for _, fqType := range types {
+		table.OnCommand(fqType, func(*anypb.Any, *struct{}, CommandContext) (*pb.EventBook, error) {
+			return nil, nil
+		})
 	}
-	if router.Domain() != "order" {
-		t.Errorf("domain mismatch: %q", router.Domain())
-	}
+	return table
 }
 
-// TestMultiHandlerBan_RuntimeCheck verifies the explicit duplicate-handler
-// check on `CommandHandlerRouterRegistry` — the surface that aggregates
-// multiple CommandHandlerRouters by (domain, command_type) pair.
-//
-// Python `router/builder.py:183` and Rust `router/builder.rs:130` raise
-// DUPLICATE_COMMAND_HANDLER when two routers cover the same pair.
-func TestMultiHandlerBan_RuntimeRegistryRejectsDuplicatePair(t *testing.T) {
-	reg := NewCommandHandlerRegistry()
-	a := NewCommandHandlerRouter[any]("ch-a", "order", &noopCHHandler{types: []string{"order.CreateOrder"}})
-	b := NewCommandHandlerRouter[any]("ch-b", "order", &noopCHHandler{types: []string{"order.CreateOrder"}})
-
-	if err := reg.Register(a); err != nil {
-		t.Fatalf("first register must succeed: %v", err)
-	}
-	err := reg.Register(b)
+// Python `Router.build()` and Rust `Router::build()` raise
+// DUPLICATE_COMMAND_HANDLER when two CommandHandlers register the same
+// (domain, command_type) pair. Go pins the same on ComposeCommandHandlers.
+func TestMultiHandlerBan_RejectsDuplicatePair(t *testing.T) {
+	_, err := ComposeCommandHandlers(
+		parityCH("ch-a", "order", "order.CreateOrder"),
+		parityCH("ch-b", "order", "order.CreateOrder"),
+	)
 	if err == nil {
-		t.Fatal("expected DUPLICATE_COMMAND_HANDLER error on second register")
+		t.Fatal("expected DUPLICATE_COMMAND_HANDLER error")
 	}
 	ce := AsClientError(err)
 	if ce == nil {
@@ -86,54 +74,21 @@ func TestMultiHandlerBan_RuntimeRegistryRejectsDuplicatePair(t *testing.T) {
 
 // Cross-domain CHs for the same command type are allowed (audit #18 C-0011).
 func TestMultiHandlerBan_AcceptsDifferentDomains(t *testing.T) {
-	reg := NewCommandHandlerRegistry()
-	a := NewCommandHandlerRouter[any]("ch-orderA", "orderA", &noopCHHandler{types: []string{"order.CreateOrder"}})
-	b := NewCommandHandlerRouter[any]("ch-orderB", "orderB", &noopCHHandler{types: []string{"order.CreateOrder"}})
-
-	if err := reg.Register(a); err != nil {
-		t.Fatalf("register a: %v", err)
-	}
-	if err := reg.Register(b); err != nil {
-		t.Fatalf("register b across domains must succeed: %v", err)
+	if _, err := ComposeCommandHandlers(
+		parityCH("ch-orderA", "orderA", "order.CreateOrder"),
+		parityCH("ch-orderB", "orderB", "order.CreateOrder"),
+	); err != nil {
+		t.Fatalf("cross-domain registration must succeed: %v", err)
 	}
 }
 
 // A single CH with multiple handled types is allowed (audit #18 C-0012).
 func TestMultiHandlerBan_AcceptsSingleHandlerMultipleTypes(t *testing.T) {
-	reg := NewCommandHandlerRegistry()
-	a := NewCommandHandlerRouter[any](
-		"ch-player",
-		"player",
-		&noopCHHandler{types: []string{"player.RegisterPlayer", "player.DepositFunds"}},
-	)
-	if err := reg.Register(a); err != nil {
+	if _, err := ComposeCommandHandlers(
+		parityCH("ch-player", "player", "player.RegisterPlayer", "player.DepositFunds"),
+	); err != nil {
 		t.Fatalf("single CH multi-type must succeed: %v", err)
 	}
-}
-
-// noopCHHandler is a minimal CommandHandlerDomainHandler[any] for the
-// registration tests above — it never dispatches.
-type noopCHHandler struct {
-	types []string
-}
-
-func (h *noopCHHandler) CommandTypes() []string         { return h.types }
-func (h *noopCHHandler) StateRouter() *StateRouter[any] { return nil }
-func (h *noopCHHandler) Rebuild(*pb.EventBook) any {
-	return nil
-}
-func (h *noopCHHandler) HandleFact(facts *pb.EventBook, _ any) (*pb.EventBook, error) {
-	return facts, nil
-}
-func (h *noopCHHandler) Handle(
-	*pb.CommandBook, *anypb.Any, any, uint32,
-) (*pb.EventBook, error) {
-	return nil, nil
-}
-func (h *noopCHHandler) OnRejected(
-	*pb.Notification, any, string, string,
-) (*RejectionHandlerResponse, error) {
-	return nil, nil
 }
 
 // ============================================================================
@@ -144,18 +99,17 @@ func (h *noopCHHandler) OnRejected(
 // `#[handles]` arm, the macro emits an unconditional `tracing::warn!` and,
 // if the user declared `#[handles_unknown]`, invokes that method too.
 //
-// Go-idiomatic equivalent: `OnUnknown(handler)` on ProjectorBase that
-// registers a catch-all; the dispatcher always logs at WARN via slog and
-// invokes the catch-all when no handler matches.
+// Go-idiomatic equivalent: `OnUnknown(handler)` on ProjectorDispatch:
+// the catch-all is invoked for unmatched types; without a catch-all the
+// dispatcher logs at WARN via the projector logger.
 
-func TestProjectorBase_CatchAllInvokedOnUnknownType(t *testing.T) {
-	p := &ProjectorBase{}
-	p.Init("test-projector", []string{"order"})
-
+func TestProjectorDispatch_CatchAllInvokedOnUnknownType(t *testing.T) {
 	var seenTypeURL string
-	p.OnUnknown(func(typeURL string) {
-		seenTypeURL = typeURL
-	})
+	p := NewProjectorDispatch("test-projector", func() *struct{} { return &struct{}{} }).
+		ForDomains("order").
+		OnUnknown(func(typeURL string) {
+			seenTypeURL = typeURL
+		})
 
 	// Build an EventBook with an unknown event type.
 	unknownAny := &anypb.Any{
@@ -170,8 +124,8 @@ func TestProjectorBase_CatchAllInvokedOnUnknownType(t *testing.T) {
 		}},
 	}
 
-	if _, err := p.Handle(book); err != nil {
-		t.Fatalf("Handle returned error: %v", err)
+	if _, err := p.Dispatch(book); err != nil {
+		t.Fatalf("Dispatch returned error: %v", err)
 	}
 
 	if seenTypeURL != "type.googleapis.com/examples.UnknownEvent" {
@@ -179,15 +133,15 @@ func TestProjectorBase_CatchAllInvokedOnUnknownType(t *testing.T) {
 	}
 }
 
-func TestProjectorBase_WarnLogOnUnknownType(t *testing.T) {
+func TestProjectorDispatch_WarnLogOnUnknownType(t *testing.T) {
 	// Capture slog WARN output via a JSON-handler-backed buffer.
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	prev := SetProjectorLogger(logger)
 	defer SetProjectorLogger(prev)
 
-	p := &ProjectorBase{}
-	p.Init("test-projector", []string{"order"})
+	p := NewProjectorDispatch("test-projector", func() *struct{} { return &struct{}{} }).
+		ForDomains("order")
 
 	unknownAny := &anypb.Any{
 		TypeUrl: "type.googleapis.com/examples.UnknownEvent",
@@ -200,8 +154,8 @@ func TestProjectorBase_WarnLogOnUnknownType(t *testing.T) {
 		}},
 	}
 
-	if _, err := p.Handle(book); err != nil {
-		t.Fatalf("Handle returned error: %v", err)
+	if _, err := p.Dispatch(book); err != nil {
+		t.Fatalf("Dispatch returned error: %v", err)
 	}
 
 	out := buf.String()
@@ -219,18 +173,16 @@ func TestProjectorBase_WarnLogOnUnknownType(t *testing.T) {
 	}
 }
 
-func TestProjectorBase_CatchAllNotFiredForKnownType(t *testing.T) {
-	p := &ProjectorBase{}
-	p.Init("test-projector", []string{"player"})
-
+func TestProjectorDispatch_CatchAllNotFiredForKnownType(t *testing.T) {
 	called := 0
-	p.Projects(func(event *wrapperspb.StringValue) *pb.Projection {
-		called++
-		return nil
-	})
-
 	var unknownCalled bool
-	p.OnUnknown(func(string) { unknownCalled = true })
+	p := NewProjectorDispatch("test-projector", func() *struct{} { return &struct{}{} }).
+		ForDomains("player").
+		OnEvent("google.protobuf.StringValue", func(*struct{}, *anypb.Any) error {
+			called++
+			return nil
+		}).
+		OnUnknown(func(string) { unknownCalled = true })
 
 	knownAny, _ := anypb.New(wrapperspb.String("hi"))
 	book := &pb.EventBook{
@@ -240,8 +192,8 @@ func TestProjectorBase_CatchAllNotFiredForKnownType(t *testing.T) {
 			Payload: &pb.EventPage_Event{Event: knownAny},
 		}},
 	}
-	if _, err := p.Handle(book); err != nil {
-		t.Fatalf("Handle: %v", err)
+	if _, err := p.Dispatch(book); err != nil {
+		t.Fatalf("Dispatch: %v", err)
 	}
 	if called == 0 {
 		t.Error("known-type handler must fire")

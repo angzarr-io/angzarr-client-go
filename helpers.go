@@ -359,7 +359,9 @@ func TryUnpack[T proto.Message](any *anypb.Any) T {
 	if any == nil {
 		return zero
 	}
-	msg := proto.Clone(zero).(T)
+	// zero is a nil typed pointer; New() via reflection builds a fresh
+	// instance where proto.Clone(zero) would panic.
+	msg := zero.ProtoReflect().Type().New().Interface().(T)
 	if err := any.UnmarshalTo(msg); err != nil {
 		return zero
 	}
@@ -373,7 +375,7 @@ func MustUnpack[T proto.Message](any *anypb.Any) T {
 	if any == nil {
 		panic("MustUnpack: nil Any")
 	}
-	msg := proto.Clone(zero).(T)
+	msg := zero.ProtoReflect().Type().New().Interface().(T)
 	if err := any.UnmarshalTo(msg); err != nil {
 		panic(fmt.Sprintf("MustUnpack: failed to unmarshal to %T: %v", zero, err))
 	}
@@ -648,4 +650,18 @@ func DestinationMap(destinations []*pb.EventBook) map[string]*pb.EventBook {
 		out[hex.EncodeToString(book.Cover.Root.Value)] = book
 	}
 	return out
+}
+
+// AnyDecodeError classifies a failure to decode a caller-constructed Any
+// payload: INVALID_ARGUMENT with the cross-language ANY_DECODE_FAILED code
+// (distinct from PERSISTED_EVENT_CORRUPT, which is store-sourced).
+// Generated dispatch thunks use this for command/event unmarshal failures.
+func AnyDecodeError(typeURL string, cause error) error {
+	return &ClientError{
+		Kind:    ErrInvalidArgument,
+		Message: MessageAnyDecodeFailed,
+		Code:    CodeAnyDecodeFailed,
+		Extras:  map[string]string{ExtraKeyTypeURL: typeURL},
+		Cause:   cause,
+	}
 }

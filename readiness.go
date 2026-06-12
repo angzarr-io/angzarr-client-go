@@ -29,10 +29,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 )
 
@@ -212,83 +212,46 @@ func splitEndpoint(raw string) (network, address string) {
 	return "tcp", raw
 }
 
-// ReadinessHealthServer is a minimal gRPC `Health` servicer whose status
-// is driven by the ReadinessSupervisor instead of being statically pinned
-// to SERVING.
+// NewHealthServer builds the stock grpc-go health server, pre-seeded to
+// NOT_SERVING for the default name ("") and every supplied service name.
 //
-// It implements `grpc_health_v1.HealthServer` and can be registered with
-// any `*grpc.Server` via `grpc_health_v1.RegisterHealthServer`.
-type ReadinessHealthServer struct {
-	grpc_health_v1.UnimplementedHealthServer
-	mu       sync.RWMutex
-	statuses map[string]grpc_health_v1.HealthCheckResponse_ServingStatus
-}
-
-// NewReadinessHealthServer builds a Health servicer that defaults to
-// NOT_SERVING for every queried name until the supervisor flips it.
+// grpc.health.v1 has a canonical implementation
+// (google.golang.org/grpc/health) that correctly streams Watch (required
+// by grpc_health_probe -watch and Envoy) and returns the
+// protocol-mandated NotFound for unknown service names. Do not hand-roll
+// a Health service; ask this one.
 //
-// Audit #68: K8s readiness probes call `Check("")`. Before any tick the
-// status must be NOT_SERVING — pre-fix Go pinned SERVING at register
-// time, which silently bypassed readiness gating.
-func NewReadinessHealthServer() *ReadinessHealthServer {
-	return &ReadinessHealthServer{
-		statuses: make(map[string]grpc_health_v1.HealthCheckResponse_ServingStatus),
+// Audit #68: K8s readiness probes call `Check("")`. Before any
+// supervisor tick the status must be NOT_SERVING — the stock server
+// defaults "" to SERVING at construction, so pre-seeding here is
+// load-bearing.
+func NewHealthServer(serviceNames ...string) *health.Server {
+	srv := health.NewServer()
+	srv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+	for _, name := range serviceNames {
+		srv.SetServingStatus(name, grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	}
+	return srv
 }
 
-// SetServingStatus publishes a new status for the given service name.
-// Safe for concurrent use by the supervisor and direct callers.
-func (s *ReadinessHealthServer) SetServingStatus(
-	service string,
-	status grpc_health_v1.HealthCheckResponse_ServingStatus,
-) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.statuses[service] = status
+// HealthStatusPublisher is the supervisor's view of a health server.
+// Satisfied by *health.Server. On shutdown the runner calls
+// health.Server.Shutdown(), after which SetServingStatus calls are
+// ignored — closing the supervisor-vs-drain publish race by construction.
+type HealthStatusPublisher interface {
+	SetServingStatus(service string, status grpc_health_v1.HealthCheckResponse_ServingStatus)
 }
-
-// GetStatus returns the currently-published status for a service name,
-// or NOT_SERVING when none has been published. Convenience accessor for
-// tests and supervisors (no gRPC round-trip required).
-func (s *ReadinessHealthServer) GetStatus(service string) grpc_health_v1.HealthCheckResponse_ServingStatus {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if status, ok := s.statuses[service]; ok {
-		return status
-	}
-	return grpc_health_v1.HealthCheckResponse_NOT_SERVING
-}
-
-// Check implements grpc_health_v1.HealthServer.
-//
-// Returns the recorded status for the requested service or NOT_SERVING
-// if the supervisor has not yet published one.
-func (s *ReadinessHealthServer) Check(
-	_ context.Context,
-	req *grpc_health_v1.HealthCheckRequest,
-) (*grpc_health_v1.HealthCheckResponse, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	status, ok := s.statuses[req.GetService()]
-	if !ok {
-		status = grpc_health_v1.HealthCheckResponse_NOT_SERVING
-	}
-	return &grpc_health_v1.HealthCheckResponse{Status: status}, nil
-}
-
-// Watch is unimplemented — the supervisor publishes via `Check` only;
-// K8s readiness probes don't use Watch. Falls through to
-// `UnimplementedHealthServer.Watch` (Unimplemented gRPC status).
 
 // ReadinessSupervisor polls a list of Probes on a fixed cadence and
 // publishes the aggregated status to one or more Health service names.
 type ReadinessSupervisor struct {
 	probes       []Probe
-	health       *ReadinessHealthServer
+	health       HealthStatusPublisher
 	serviceNames []string
 	interval     time.Duration
 	timeout      time.Duration
 	logger       *slog.Logger
+	kick         chan struct{}
 }
 
 // NewReadinessSupervisor builds a supervisor. `serviceNames` is the list
@@ -297,7 +260,7 @@ type ReadinessSupervisor struct {
 // tick cadence; `timeout` is the per-probe timeout.
 func NewReadinessSupervisor(
 	probes []Probe,
-	health *ReadinessHealthServer,
+	health HealthStatusPublisher,
 	serviceNames []string,
 	interval, timeout time.Duration,
 ) *ReadinessSupervisor {
@@ -308,6 +271,19 @@ func NewReadinessSupervisor(
 		interval:     interval,
 		timeout:      timeout,
 		logger:       slog.Default(),
+		kick:         make(chan struct{}, 1),
+	}
+}
+
+// Kick requests an immediate re-check without waiting out the current
+// interval. Called after TransportSignal.MarkBound so readiness flips
+// green as soon as the listener accepts, instead of up to one full
+// interval later (first-tick vs MarkBound race). Non-blocking; safe for
+// concurrent use.
+func (s *ReadinessSupervisor) Kick() {
+	select {
+	case s.kick <- struct{}{}:
+	default:
 	}
 }
 
@@ -333,6 +309,8 @@ func (s *ReadinessSupervisor) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-s.kick:
+			// Immediate re-check requested (e.g. listener just bound).
 		case <-time.After(s.interval):
 		}
 	}
@@ -399,8 +377,8 @@ func (s *ReadinessSupervisor) runProbe(ctx context.Context, probe Probe) bool {
 			"readiness probe timed out",
 			slog.String("probe", probe.Name()),
 		)
-		// Drain the goroutine so it can't leak.
-		go func() { <-resultCh }()
+		// No drain needed: resultCh is buffered (size 1) and the probe
+		// goroutine sends exactly once, so it can never block.
 		return false
 	}
 }
@@ -416,14 +394,39 @@ func SupervisorTick(probes []Probe, timeout time.Duration) bool {
 	return s.tick(context.Background())
 }
 
-// PublishShutdownStatus flips every named service to NOT_SERVING.
+// Shutdown drain configuration.
 //
-// Audit #83: on graceful shutdown, the runner publishes NOT_SERVING so
-// the K8s load balancer drains the pod before the listener closes.
-func PublishShutdownStatus(srv *ReadinessHealthServer, serviceNames []string) {
-	for _, name := range serviceNames {
-		srv.SetServingStatus(name, grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+// Audit #83 (corrected ordering): on SIGTERM the runner flips health to
+// NOT_SERVING via health.Server.Shutdown(), waits the drain duration so
+// load balancers observe the flip and stop routing, and only then calls
+// GracefulStop. Publishing after Serve returns is too late — the
+// listener is already closed.
+const (
+	// EnvShutdownDrain configures the NOT_SERVING → GracefulStop wait.
+	// Accepts a Go duration string (e.g. "5s", "250ms", "0s").
+	EnvShutdownDrain = "ANGZARR_SHUTDOWN_DRAIN"
+	// DefaultShutdownDrain gives load balancers time to observe the
+	// NOT_SERVING flip before the listener closes.
+	DefaultShutdownDrain = 5 * time.Second
+)
+
+// ResolveDrainDuration reads EnvShutdownDrain. Unset falls back to
+// DefaultShutdownDrain; a set-but-unparseable value errors loudly
+// (audit #40: operator typos surface at startup, never silently default).
+func ResolveDrainDuration() (time.Duration, error) {
+	raw := os.Getenv(EnvShutdownDrain)
+	if raw == "" {
+		return DefaultShutdownDrain, nil
 	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		return 0, InvalidArgumentErrorWithCode(
+			CodeInvalidDuration,
+			"invalid shutdown drain env value",
+			map[string]string{ExtraKeyInput: raw, ExtraKeyEnvVar: EnvShutdownDrain},
+		)
+	}
+	return d, nil
 }
 
 // LogServerStarted emits the cross-language `server_started` structured

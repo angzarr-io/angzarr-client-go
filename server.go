@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 )
@@ -184,7 +185,7 @@ func CreateServerE(
 ) (
 	*grpc.Server,
 	net.Listener,
-	*ReadinessHealthServer,
+	*health.Server,
 	*ReadinessSupervisor,
 	*TransportSignal,
 	func(),
@@ -219,10 +220,15 @@ func CreateServerE(
 	// Add the main service
 	registrar(server)
 
-	// HIGH-5.5 (audit #68): start NOT_SERVING. Use the readiness-driven
-	// health server unconditionally so K8s readiness reads NOT_SERVING
-	// until probes go green.
-	healthSrv := NewReadinessHealthServer()
+	serviceNames := []string{""}
+	if opts.ServiceName != "" {
+		serviceNames = append(serviceNames, opts.ServiceName)
+	}
+
+	// HIGH-5.5 (audit #68): start NOT_SERVING. Stock grpc-go health
+	// server, pre-seeded, so K8s readiness reads NOT_SERVING until
+	// probes go green (see NewHealthServer).
+	healthSrv := NewHealthServer(serviceNames...)
 	grpc_health_v1.RegisterHealthServer(server, healthSrv)
 
 	// Always wire a TransportProbe so the supervisor can flip the health
@@ -230,10 +236,6 @@ func CreateServerE(
 	// on top.
 	transportProbe, transportSignal := NewTransportProbe()
 	probes := append([]Probe{transportProbe}, opts.Probes...)
-	serviceNames := []string{""}
-	if opts.ServiceName != "" {
-		serviceNames = append(serviceNames, opts.ServiceName)
-	}
 	interval, timeout := ProbeConfigFromEnv()
 	supervisor := NewReadinessSupervisor(probes, healthSrv, serviceNames, interval, timeout)
 	if opts.Logger != nil {
@@ -274,7 +276,7 @@ func CreateServerWithReadiness(
 ) (
 	*grpc.Server,
 	net.Listener,
-	*ReadinessHealthServer,
+	*health.Server,
 	*ReadinessSupervisor,
 	*TransportSignal,
 	func(),
@@ -316,6 +318,14 @@ func runServerWithReadiness(
 	}
 	defer cleanup()
 
+	// Audit #40: a set-but-bad drain value refuses to start, loudly —
+	// validated before any goroutine launches.
+	drain, err := ResolveDrainDuration()
+	if err != nil {
+		logger.Error("invalid shutdown drain configuration", slog.Any("error", err))
+		return
+	}
+
 	// Audit #89: cross-language structured log shape.
 	LogServerStarted(logger, opts.ServiceName, opts.Domain, config.Type, config.Address)
 
@@ -327,36 +337,36 @@ func runServerWithReadiness(
 		supervisor.Run(supCtx)
 	}()
 
-	// Mark transport bound — TransportProbe flips to ok on the next tick.
+	// Mark transport bound, then kick the supervisor so readiness flips
+	// green immediately instead of waiting out the current interval.
 	transportSignal.MarkBound()
+	supervisor.Kick()
 
-	// Signal handler.
+	// Audit #83 (corrected ordering): NOT_SERVING → drain → GracefulStop.
+	// health.Server.Shutdown flips every registered name to NOT_SERVING
+	// and ignores all later SetServingStatus calls, so a still-running
+	// supervisor cannot flip readiness back during the drain. The drain
+	// wait gives load balancers time to observe the flip and stop routing
+	// BEFORE GracefulStop closes the listener — publishing after Serve
+	// returns (the old order) was too late.
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go func() {
 		<-sigCtx.Done()
+		healthSrv.Shutdown()
+		time.Sleep(drain)
 		server.GracefulStop()
 	}()
 
 	serveErr := server.Serve(listener)
 
-	// Audit #83: shut down in two phases.
-	// 1. Cancel the supervisor and wait for it to actually exit so any
-	//    in-flight SetServingStatus finishes before we publish NOT_SERVING.
-	// 2. Flip every registered health name to NOT_SERVING so K8s readiness
-	//    goes red and the load balancer drains the pod.
+	// Supervisor teardown after Serve returns.
 	supCancel()
 	select {
 	case <-supDone:
 	case <-time.After(5 * time.Second):
-		// Supervisor stuck — log and continue with shutdown publish.
 		logger.Warn("readiness supervisor did not exit cleanly")
 	}
-	serviceNames := []string{""}
-	if opts.ServiceName != "" {
-		serviceNames = append(serviceNames, opts.ServiceName)
-	}
-	PublishShutdownStatus(healthSrv, serviceNames)
 
 	// Audit #89: cross-language structured shutdown log.
 	LogServerShutdown(logger, opts.ServiceName, opts.Domain)

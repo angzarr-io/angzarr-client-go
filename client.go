@@ -2,7 +2,9 @@ package angzarr
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -230,12 +232,14 @@ func (c *QueryClient) GetEvents(ctx context.Context, query *pb.Query) ([]*pb.Eve
 	var events []*pb.EventBook
 	for {
 		event, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return events, nil
+		}
 		if err != nil {
-			break
+			return nil, GRPCError(err)
 		}
 		events = append(events, event)
 	}
-	return events, nil
 }
 
 // Close closes the underlying connection.
@@ -298,6 +302,14 @@ func CommandHandlerClientFromChannel(conn *grpc.ClientConn) *CommandHandlerClien
 		inner: pb.NewCommandHandlerCoordinatorServiceClient(conn),
 		conn:  conn,
 	}
+}
+
+// CommandHandlerClientFromService creates a client over an in-process
+// service implementation — no connection, no serialization. Intended for
+// acceptance harnesses and embedded backends; the wire path is exercised
+// by FromChannel/NewCommandHandlerClient.
+func CommandHandlerClientFromService(inner pb.CommandHandlerCoordinatorServiceClient) *CommandHandlerClient {
+	return &CommandHandlerClient{inner: inner}
 }
 
 // Handle executes a command asynchronously (fire-and-forget).
@@ -551,4 +563,3 @@ func (c *DomainClient) Close() error {
 	}
 	return nil
 }
-

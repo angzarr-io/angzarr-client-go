@@ -13,13 +13,18 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
 )
 
 // ---------------------------------------------------------------------------
@@ -308,7 +313,7 @@ func TestHealthCheck_ReflectsProbeStatus(t *testing.T) {
 	signal := &liveSignal{}
 	signal.Set(false)
 
-	healthSrv := NewReadinessHealthServer()
+	healthSrv := NewHealthServer("MyService")
 	supervisor := NewReadinessSupervisor(
 		[]Probe{signal},
 		healthSrv,
@@ -353,7 +358,7 @@ func TestHealthCheck_StartsNotServingUntilTransportProbeBinds(t *testing.T) {
 	// The transport probe is the canonical "started but not yet bound"
 	// gate. Without MarkBound, Health.Check must report NOT_SERVING.
 	probe, signal := NewTransportProbe()
-	healthSrv := NewReadinessHealthServer()
+	healthSrv := NewHealthServer("MyService")
 	supervisor := NewReadinessSupervisor(
 		[]Probe{probe},
 		healthSrv,
@@ -385,7 +390,7 @@ func TestHealthCheck_StartsNotServingUntilTransportProbeBinds(t *testing.T) {
 // waitForStatus polls Health.Check until it reports `want` or `timeout` elapses.
 func waitForStatus(
 	t *testing.T,
-	srv *ReadinessHealthServer,
+	srv *health.Server,
 	service string,
 	want grpc_health_v1.HealthCheckResponse_ServingStatus,
 	timeout time.Duration,
@@ -410,20 +415,26 @@ func waitForStatus(
 // Shutdown — flips all registered names to NOT_SERVING (audit #83)
 // ---------------------------------------------------------------------------
 
-func TestReadinessHealthServer_PublishShutdown(t *testing.T) {
-	srv := NewReadinessHealthServer()
+func TestHealthServer_Shutdown_FlipsAllNamesAndIgnoresLaterSets(t *testing.T) {
+	srv := NewHealthServer("MyService")
 	srv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 	srv.SetServingStatus("MyService", grpc_health_v1.HealthCheckResponse_SERVING)
 
-	PublishShutdownStatus(srv, []string{"", "MyService"})
+	srv.Shutdown()
 
-	r1, _ := srv.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{})
-	if r1.Status != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
-		t.Errorf("default service: expected NOT_SERVING, got %v", r1.Status)
-	}
-	r2, _ := srv.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{Service: "MyService"})
-	if r2.Status != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
-		t.Errorf("MyService: expected NOT_SERVING, got %v", r2.Status)
+	// A supervisor still ticking during the drain cannot flip readiness
+	// back: Sets after Shutdown are ignored. This closes the
+	// shutdown-vs-supervisor publish race by construction.
+	srv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+
+	for _, name := range []string{"", "MyService"} {
+		resp, err := srv.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{Service: name})
+		if err != nil {
+			t.Fatalf("Check(%q): %v", name, err)
+		}
+		if resp.Status != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
+			t.Errorf("Check(%q) after Shutdown = %v, want NOT_SERVING", name, resp.Status)
+		}
 	}
 }
 
@@ -433,7 +444,7 @@ func TestReadinessHealthServer_PublishShutdown(t *testing.T) {
 
 func TestReadinessSupervisor_LoopsUntilCancelled(t *testing.T) {
 	probe := &fakeProbe{name: "p", results: []bool{true}}
-	srv := NewReadinessHealthServer()
+	srv := NewHealthServer("MyService")
 	supervisor := NewReadinessSupervisor(
 		[]Probe{probe},
 		srv,
@@ -457,3 +468,162 @@ func TestReadinessSupervisor_LoopsUntilCancelled(t *testing.T) {
 // unused imports flagged here would fail compilation.
 var _ = errors.New
 var _ = fmt.Sprintf
+
+// ----------------------------------------------------------------------------
+// grpc-go health.NewServer adoption (replaces hand-rolled ReadinessHealthServer)
+// ----------------------------------------------------------------------------
+
+// Audit #68 semantics preserved: before any supervisor tick, every
+// registered name reads NOT_SERVING (the stock server defaults "" to
+// SERVING, so construction must pre-seed).
+func TestHealthServer_PreSeedsNotServing(t *testing.T) {
+	srv := NewHealthServer("MyService")
+	for _, name := range []string{"", "MyService"} {
+		resp, err := srv.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{Service: name})
+		if err != nil {
+			t.Fatalf("Check(%q): %v", name, err)
+		}
+		if resp.Status != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
+			t.Errorf("Check(%q) = %v, want NOT_SERVING", name, resp.Status)
+		}
+	}
+}
+
+// Protocol-mandated: unknown service names are NotFound, not NOT_SERVING
+// (the hand-rolled server conflated "unknown" with "not ready").
+func TestHealthServer_UnknownService_ReturnsNotFound(t *testing.T) {
+	srv := NewHealthServer()
+	_, err := srv.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{Service: "never-registered"})
+	if err == nil {
+		t.Fatal("expected NotFound for unknown service")
+	}
+	if st, _ := status.FromError(err); st.Code() != codes.NotFound {
+		t.Fatalf("code = %v, want NotFound", st.Code())
+	}
+}
+
+type fakeHealthWatchStream struct {
+	grpc.ServerStream
+	ctx  context.Context
+	sent chan *grpc_health_v1.HealthCheckResponse
+}
+
+func (s *fakeHealthWatchStream) Send(r *grpc_health_v1.HealthCheckResponse) error {
+	s.sent <- r
+	return nil
+}
+func (s *fakeHealthWatchStream) Context() context.Context { return s.ctx }
+
+// Watch must stream (grpc_health_probe -watch, Envoy). The hand-rolled
+// server returned UNIMPLEMENTED.
+func TestHealthServer_Watch_StreamsInitialStatus(t *testing.T) {
+	srv := NewHealthServer()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := &fakeHealthWatchStream{ctx: ctx, sent: make(chan *grpc_health_v1.HealthCheckResponse, 1)}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.Watch(&grpc_health_v1.HealthCheckRequest{Service: ""}, stream)
+	}()
+
+	select {
+	case resp := <-stream.sent:
+		if resp.Status != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
+			t.Errorf("initial Watch status = %v, want NOT_SERVING", resp.Status)
+		}
+	case err := <-done:
+		t.Fatalf("Watch returned instead of streaming: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Watch sent no initial status")
+	}
+	cancel()
+	<-done
+}
+
+type countingProbe struct {
+	mu    sync.Mutex
+	count int
+}
+
+func (p *countingProbe) Name() string { return "counting" }
+func (p *countingProbe) Check(context.Context) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.count++
+	return true
+}
+func (p *countingProbe) calls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.count
+}
+
+// MarkBound→Kick closes the up-to-interval window where readiness stays
+// red after the listener is already accepting (supervisor first-tick race).
+func TestSupervisor_Kick_TriggersImmediateRecheck(t *testing.T) {
+	probe := &countingProbe{}
+	srv := NewHealthServer()
+	sup := NewReadinessSupervisor([]Probe{probe}, srv, []string{""}, time.Hour, time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); sup.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for probe.calls() < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if probe.calls() < 1 {
+		t.Fatal("first tick never ran")
+	}
+
+	sup.Kick()
+	deadline = time.Now().Add(2 * time.Second)
+	for probe.calls() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if probe.calls() < 2 {
+		t.Fatal("Kick did not trigger an immediate re-check (interval is 1h)")
+	}
+	cancel()
+	<-done
+}
+
+// Drain knob: env is config input (12-factor); strict parse per audit #40.
+func TestResolveDrainDuration(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"unset uses default", "", DefaultShutdownDrain, false},
+		{"explicit duration", "250ms", 250 * time.Millisecond, false},
+		{"zero allowed", "0s", 0, false},
+		{"garbage errors loudly", "soon-ish", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env == "" {
+				os.Unsetenv(EnvShutdownDrain)
+			} else {
+				t.Setenv(EnvShutdownDrain, tt.env)
+			}
+			got, err := ResolveDrainDuration()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error for bad duration")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

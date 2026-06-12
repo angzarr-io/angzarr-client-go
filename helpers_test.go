@@ -791,3 +791,61 @@ func TestTemporalSelectionByTime(t *testing.T) {
 		t.Error("timestamp mismatch")
 	}
 }
+
+// TryUnpack/MustUnpack had zero coverage and panicked on every call:
+// proto.Clone(zero) clones a nil typed pointer. These tests pin the
+// repaired behavior: unpack on match, zero/panic on mismatch.
+func TestTryUnpack_MatchingType_ReturnsMessage(t *testing.T) {
+	cover := &pb.Cover{Domain: "hand"}
+	packed, err := anypb.New(cover)
+	if err != nil {
+		t.Fatalf("anypb.New: %v", err)
+	}
+	got := TryUnpack[*pb.Cover](packed)
+	if got == nil {
+		t.Fatal("TryUnpack returned zero for a matching type")
+	}
+	if got.Domain != "hand" {
+		t.Fatalf("TryUnpack lost payload: got domain %q", got.Domain)
+	}
+}
+
+func TestTryUnpack_MismatchedType_ReturnsZero(t *testing.T) {
+	packed, err := anypb.New(&pb.Cover{Domain: "hand"})
+	if err != nil {
+		t.Fatalf("anypb.New: %v", err)
+	}
+	if got := TryUnpack[*pb.Notification](packed); got != nil {
+		t.Fatalf("TryUnpack returned non-zero for mismatched type: %v", got)
+	}
+}
+
+func TestTryUnpack_NilAny_ReturnsZero(t *testing.T) {
+	if got := TryUnpack[*pb.Cover](nil); got != nil {
+		t.Fatalf("TryUnpack(nil) = %v, want zero", got)
+	}
+}
+
+func TestMustUnpack_MatchingType_ReturnsMessage(t *testing.T) {
+	packed, err := anypb.New(&pb.Cover{Domain: "table"})
+	if err != nil {
+		t.Fatalf("anypb.New: %v", err)
+	}
+	got := MustUnpack[*pb.Cover](packed)
+	if got.Domain != "table" {
+		t.Fatalf("MustUnpack lost payload: got domain %q", got.Domain)
+	}
+}
+
+func TestMustUnpack_MismatchedType_Panics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("MustUnpack did not panic on mismatched type")
+		}
+	}()
+	packed, err := anypb.New(&pb.Cover{})
+	if err != nil {
+		t.Fatalf("anypb.New: %v", err)
+	}
+	MustUnpack[*pb.Notification](packed)
+}

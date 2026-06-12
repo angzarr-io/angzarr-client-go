@@ -2,7 +2,6 @@ package angzarr
 
 import (
 	"encoding/hex"
-	"fmt"
 
 	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"github.com/google/uuid"
@@ -72,9 +71,10 @@ func (w *CoverW) RoutingKey() string {
 	return w.Domain()
 }
 
-// CacheKey generates a cache key based on domain + root.
+// CacheKey generates the canonical "{edition}:{domain}:{root_hex}" key.
+// Delegates to CacheKey so the cross-language shape lives in one place.
 func (w *CoverW) CacheKey() string {
-	return fmt.Sprintf("%s:%s", w.Domain(), w.RootIDHex())
+	return CacheKey(w.Cover)
 }
 
 // EventBookW wraps an EventBook proto with extension methods.
@@ -173,9 +173,10 @@ func (w *EventBookW) RoutingKey() string {
 	return w.Domain()
 }
 
-// CacheKey generates a cache key based on domain + root.
+// CacheKey generates the canonical "{edition}:{domain}:{root_hex}" key.
+// Delegates to CacheKey so the cross-language shape lives in one place.
 func (w *EventBookW) CacheKey() string {
-	return fmt.Sprintf("%s:%s", w.Domain(), w.RootIDHex())
+	return CacheKey(w.EventBook)
 }
 
 // CoverWrapper returns a CoverW wrapping the cover.
@@ -257,13 +258,10 @@ func (w *CommandBookW) RoutingKey() string {
 	return w.Domain()
 }
 
-// CacheKey generates a cache key based on domain + root.
+// CacheKey generates the canonical "{edition}:{domain}:{root_hex}" key.
+// Delegates to CacheKey so the cross-language shape lives in one place.
 func (w *CommandBookW) CacheKey() string {
-	c := w.cover()
-	if c == nil || c.Root == nil {
-		return fmt.Sprintf("%s:", w.Domain())
-	}
-	return fmt.Sprintf("%s:%s", w.Domain(), hex.EncodeToString(c.Root.Value))
+	return CacheKey(w.CommandBook)
 }
 
 // CoverWrapper returns a CoverW wrapping the cover.
