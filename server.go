@@ -57,6 +57,20 @@ type TransportConfig struct {
 
 // GetTransportConfig reads transport configuration from environment.
 //
+// Equivalent to ResolveTransportConfig with no per-instance options —
+// prefer ResolveTransportConfig when a server declares its own default
+// port.
+func GetTransportConfig() TransportConfig {
+	return ResolveTransportConfig(ServerOptions{})
+}
+
+// ResolveTransportConfig resolves the transport for ONE server instance.
+//
+// Environment is config INPUT only (12-factor): it seeds operator
+// overrides and defaults but is never written back, so multiple servers
+// in one process each bind their own declared port instead of inheriting
+// the first instance's.
+//
 // Environment variables:
 //   - TRANSPORT_TYPE: "tcp" (default) or "uds"
 //   - UDS_BASE_PATH: Base directory for sockets (default: /tmp/angzarr)
@@ -64,8 +78,11 @@ type TransportConfig struct {
 //   - DOMAIN: Domain name for aggregates
 //   - SAGA_NAME: Saga name (used if DOMAIN not set)
 //   - PROJECTOR_NAME: Projector name (used if DOMAIN and SAGA_NAME not set)
-//   - PORT: TCP port (default: 50052)
-func GetTransportConfig() TransportConfig {
+//
+// TCP precedence (HIGH-5.2 / MED-5.6): ANGZARR_BIND_ADDRESS, then the
+// PORT env var, then the instance's ServerOptions.DefaultPort, then the
+// legacy default 50052.
+func ResolveTransportConfig(opts ServerOptions) TransportConfig {
 	transport := os.Getenv("TRANSPORT_TYPE")
 	if transport == "" {
 		transport = "tcp"
@@ -109,13 +126,13 @@ func GetTransportConfig() TransportConfig {
 		}
 	}
 
-	// HIGH-5.2 / MED-5.6: prefer ANGZARR_BIND_ADDRESS when set; otherwise
-	// build "[::]:<port>" (dual-stack IPv6 wildcard) from the PORT env or
-	// the legacy default 50052.
 	if explicit := os.Getenv(EnvBindAddress); explicit != "" {
 		return TransportConfig{Type: "tcp", Address: explicit}
 	}
 	port := os.Getenv("PORT")
+	if port == "" {
+		port = opts.DefaultPort
+	}
 	if port == "" {
 		port = "50052"
 	}
@@ -191,12 +208,25 @@ func CreateServerE(
 	func(),
 	error,
 ) {
-	if opts.DefaultPort != "" && os.Getenv("PORT") == "" {
-		os.Setenv("PORT", opts.DefaultPort)
-	}
+	return createServerWithConfig(registrar, opts, ResolveTransportConfig(opts))
+}
 
-	config := GetTransportConfig()
-
+// createServerWithConfig builds the server against an already-resolved
+// transport config so callers that also log the address (RunServer) bind
+// and log the same struct — the logged port IS the bound port.
+func createServerWithConfig(
+	registrar ServiceRegistrar,
+	opts ServerOptions,
+	config TransportConfig,
+) (
+	*grpc.Server,
+	net.Listener,
+	*health.Server,
+	*ReadinessSupervisor,
+	*TransportSignal,
+	func(),
+	error,
+) {
 	var listener net.Listener
 	var err error
 
@@ -300,7 +330,7 @@ func RunServer(registrar ServiceRegistrar, opts ServerOptions) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	config := GetTransportConfig()
+	config := ResolveTransportConfig(opts)
 	runServerWithReadiness(registrar, opts, config, logger)
 }
 
@@ -311,7 +341,7 @@ func runServerWithReadiness(
 	config TransportConfig,
 	logger *slog.Logger,
 ) {
-	server, listener, healthSrv, supervisor, transportSignal, cleanup, err := CreateServerE(registrar, opts)
+	server, listener, healthSrv, supervisor, transportSignal, cleanup, err := createServerWithConfig(registrar, opts, config)
 	if err != nil {
 		logger.Error("bind failed", slog.Any("error", err))
 		return
@@ -401,8 +431,7 @@ const (
 	HealthNameUpcaster       = "angzarr.upcaster"
 )
 
-// Per-kind runner functions live in handler.go (typed-router specific
-// signatures: RunCommandHandlerServer[S], RunSagaServer, etc.). The
-// per-kind health-name constants above are also used by those runners
-// so cross-language service names match Py/Rs `HEALTH_NAME_*` constants
-// at audit #74 call sites.
+// Per-kind runner functions live in engine_grpc.go (Run*DispatchServer)
+// and upcaster_grpc.go (RunUpcasterServer). The per-kind health-name
+// constants above are used by those runners so cross-language service
+// names match Py/Rs `HEALTH_NAME_*` constants at audit #74 call sites.
