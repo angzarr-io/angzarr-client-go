@@ -6,3 +6,7 @@ plugins:
   - remote: buf.build/grpc/go
     out: proto
     opt: paths=source_relative
+  # Component dispatch wiring from (angzarr.v1.component) declarations.
+  - local: ["go", "run", "./cmd/protoc-gen-angzarr"]
+    out: proto
+    opt: paths=source_relative

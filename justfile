@@ -262,3 +262,12 @@ fmt-fix: generate-proto
 
 # Cross-language alias — `just check` runs fmt check.
 check: fmt
+
+# === Code complexity (gocyclo, in container) ===
+# Per-function cyclomatic complexity via gocyclo (the de-facto Go tool, the
+# same engine golangci-lint embeds). Baked into the angzarr-go image.
+# Generated proto bindings and tests are excluded. Defaults to the module
+# root; pass paths/flags to scope, e.g. `just complexity -over 20 .`.
+# Report-only — never fails the build.
+complexity *ARGS:
+    just _container complexity {{ARGS}}

@@ -67,3 +67,12 @@ fmt:
 # Auto-format code
 fmt-fix:
     gofmt -w .
+
+# Per-function cyclomatic complexity (gocyclo). Generated proto bindings
+# (*.pb.go, *.pb.gw.go, the proto/ tree) and tests are excluded so numbers
+# reflect hand-written source. `-avg` appends the package average. Leading
+# `-` keeps this a report — gocyclo would otherwise exit non-zero when used
+# with `-over`. Defaults to the module root; pass paths/flags to scope.
+GOCYCLO_IGNORE := "\\.pb\\.go$|\\.pb\\.gw\\.go$|/proto/|_test\\.go$"
+complexity *ARGS:
+    -gocyclo -avg -ignore '{{GOCYCLO_IGNORE}}' {{ if ARGS == "" { "." } else { ARGS } }}
