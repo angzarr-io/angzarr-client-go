@@ -3,12 +3,15 @@
 package features
 
 // Acceptance hook: the second of the two suite hooks. Where the unit hook
-// (features_test.go) drives the engine in-process, this one drives the
-// REAL angzarr core — the coordinator deployed in the kind cluster —
-// through the real client, so the coordinator/bus-side scenarios the
-// unit tier marks @wip (sequence admission, publish fan-out, correlation
-// stamping, subscription matching) execute against the implementation
-// that owns them.
+// (features_test.go) drives the engine in-process, this one runs against
+// the REAL angzarr core deployed in kind, dialed through the real client.
+//
+// Its tier is features/coordinator-contract/ — the living documentation
+// of coordinator-side behavior (fact flow, merge strategies, state
+// building, edition propagation) that no suite executes yet. Poker-shaped
+// functional coverage lives in the example tiers (examples-* repos); this
+// hook exists for the generic-vocabulary coordinator contract once step
+// definitions drive the deployed coordinator for real.
 //
 // Connectivity comes from ANGZARR_ACCEPTANCE_ENDPOINT (e.g. a
 // `kubectl port-forward` of the coordinator/gateway service); the suite
@@ -27,12 +30,9 @@ import (
 const EnvAcceptanceEndpoint = "ANGZARR_ACCEPTANCE_ENDPOINT"
 
 var acceptanceOpts = godog.Options{
-	Output: colors.Colored(os.Stdout),
-	Format: "pretty",
-	Paths:  []string{"../angzarr-project/features/client"},
-	// The unit tier's pending set: scenarios whose semantics live on the
-	// coordinator/bus side. Here they are the whole point.
-	Tags:        "@wip",
+	Output:      colors.Colored(os.Stdout),
+	Format:      "pretty",
+	Paths:       []string{"../angzarr-project/features/coordinator-contract"},
 	Randomize:   0,
 	Concurrency: 1,
 	Strict:      false,
