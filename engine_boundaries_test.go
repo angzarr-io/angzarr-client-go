@@ -448,6 +448,43 @@ func TestProjectorDispatch_UnknownType_DoesNotEndTheFold(t *testing.T) {
 	}
 }
 
+// The correlation ID flows through all commands/events (Cover contract):
+// commands a saga emits carry the source book's correlation unless the
+// handler stamped their cover itself — fill-only, like the aggregate's
+// ext/sequence stamping.
+func TestSagaDispatch_FillOnlyCorrelationOnEmittedCommands(t *testing.T) {
+	d := NewSagaDispatch("saga", "orders", "inventory").
+		OnEvent("test.OrderCreated", func(*anypb.Any, *Destinations) ([]*pb.CommandBook, []*pb.EventBook, error) {
+			return []*pb.CommandBook{
+				{Cover: &pb.Cover{Domain: "inventory"}},                            // blank correlation — filled
+				{Cover: &pb.Cover{Domain: "inventory", CorrelationId: "explicit"}}, // handler-set — preserved
+				{}, // no cover at all — created and filled
+			}, nil, nil
+		})
+	source := &pb.EventBook{
+		Cover: &pb.Cover{Domain: "orders", CorrelationId: "workflow-7"},
+		Pages: []*pb.EventPage{
+			{Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: TypeURLPrefix + "test.OrderCreated"}}},
+		},
+	}
+	resp, err := d.Dispatch(source, nil)
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(resp.Commands) != 3 {
+		t.Fatalf("commands = %d, want 3", len(resp.Commands))
+	}
+	if got := resp.Commands[0].GetCover().GetCorrelationId(); got != "workflow-7" {
+		t.Errorf("blank correlation = %q, want the source's workflow-7 filled in", got)
+	}
+	if got := resp.Commands[1].GetCover().GetCorrelationId(); got != "explicit" {
+		t.Errorf("handler-set correlation = %q, want explicit preserved (fill-only)", got)
+	}
+	if got := resp.Commands[2].GetCover().GetCorrelationId(); got != "workflow-7" {
+		t.Errorf("coverless command correlation = %q, want workflow-7 on a created cover", got)
+	}
+}
+
 // --- Fan-out merge semantics --------------------------------------------------
 
 type notifyingPM struct {

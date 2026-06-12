@@ -278,6 +278,21 @@ func (d *SagaDispatch) Dispatch(source *pb.EventBook, destinationSequences map[s
 		resp.Commands = append(resp.Commands, commands...)
 		resp.Events = append(resp.Events, events...)
 	}
+
+	// FILL-ONLY correlation propagation (Cover contract: the correlation
+	// ID flows through all commands/events): emitted commands inherit the
+	// source book's correlation unless the handler stamped one itself —
+	// the saga sibling of the aggregate's stampEmittedBook.
+	if corr := source.GetCover().GetCorrelationId(); corr != "" {
+		for _, cmd := range resp.Commands {
+			if cmd.Cover == nil {
+				cmd.Cover = &pb.Cover{}
+			}
+			if cmd.Cover.CorrelationId == "" {
+				cmd.Cover.CorrelationId = corr
+			}
+		}
+	}
 	return resp, nil
 }
 
