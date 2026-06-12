@@ -343,6 +343,111 @@ func TestRouterBuilder_ProjectorOnly_BuildsProjectorFanout(t *testing.T) {
 	}
 }
 
+// --- Every-page walks: skipped pages never terminate the walk ----------------
+
+func sagaCountingTable(dispatched *int) *SagaDispatch {
+	return NewSagaDispatch("saga", "orders", "inventory").
+		OnEvent("test.OrderCreated", func(*anypb.Any, *Destinations) ([]*pb.CommandBook, []*pb.EventBook, error) {
+			*dispatched++
+			return []*pb.CommandBook{{}}, nil, nil
+		})
+}
+
+func TestSagaDispatch_NilEventPage_DoesNotEndTheWalk(t *testing.T) {
+	dispatched := 0
+	d := sagaCountingTable(&dispatched)
+	source := &pb.EventBook{Cover: &pb.Cover{Domain: "orders"}, Pages: []*pb.EventPage{
+		{}, // no payload
+		{Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: TypeURLPrefix + "test.OrderCreated"}}},
+	}}
+	if _, err := d.Dispatch(source, nil); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if dispatched != 1 {
+		t.Fatalf("dispatched = %d, want the page after the gap to fire", dispatched)
+	}
+}
+
+// Spec C-0051: an undeclared type is skipped; the walk continues to later
+// pages.
+func TestSagaDispatch_UndeclaredType_DoesNotEndTheWalk(t *testing.T) {
+	dispatched := 0
+	d := sagaCountingTable(&dispatched)
+	source := &pb.EventBook{Cover: &pb.Cover{Domain: "orders"}, Pages: []*pb.EventPage{
+		{Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: TypeURLPrefix + "test.Undeclared"}}},
+		{Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: TypeURLPrefix + "test.OrderCreated"}}},
+	}}
+	if _, err := d.Dispatch(source, nil); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if dispatched != 1 {
+		t.Fatalf("dispatched = %d, want the declared page after the undeclared one to fire", dispatched)
+	}
+}
+
+func TestSagaDispatch_RejectionPage_WalkContinues(t *testing.T) {
+	fq := "angzarr_client.proto.examples.v1.ReserveStock"
+	dispatched, compensated := 0, 0
+	d := sagaCountingTable(&dispatched).
+		OnRejected(fq, func(*pb.Notification, *pb.RejectionNotification) ([]*pb.EventBook, error) {
+			compensated++
+			return []*pb.EventBook{{}}, nil
+		})
+	source := &pb.EventBook{Cover: &pb.Cover{Domain: "orders"}, Pages: []*pb.EventPage{
+		notificationPageFor(t, fq),
+		{Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: TypeURLPrefix + "test.OrderCreated"}}},
+	}}
+	resp, err := d.Dispatch(source, nil)
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if compensated != 1 || dispatched != 1 {
+		t.Fatalf("compensated = %d, dispatched = %d — a rejection page must not end the walk", compensated, dispatched)
+	}
+	if len(resp.Events) != 1 || len(resp.Commands) != 1 {
+		t.Fatalf("events = %d, commands = %d, want both the compensation and the command", len(resp.Events), len(resp.Commands))
+	}
+}
+
+func TestProjectorDispatch_NilEventPage_DoesNotEndTheFold(t *testing.T) {
+	folded := 0
+	d := NewProjectorDispatch("proj", func() *counterState { return &counterState{} }).
+		OnEvent("test.OrderCreated", func(*counterState, *anypb.Any) error {
+			folded++
+			return nil
+		})
+	book := &pb.EventBook{Cover: &pb.Cover{Domain: "orders"}, Pages: []*pb.EventPage{
+		{}, // no payload
+		{Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: TypeURLPrefix + "test.OrderCreated"}}},
+	}}
+	if _, err := d.Dispatch(book); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if folded != 1 {
+		t.Fatalf("folded = %d, want the page after the gap to fold", folded)
+	}
+}
+
+func TestProjectorDispatch_UnknownType_DoesNotEndTheFold(t *testing.T) {
+	folded := 0
+	d := NewProjectorDispatch("proj", func() *counterState { return &counterState{} }).
+		OnUnknown(func(string) {}).
+		OnEvent("test.OrderCreated", func(*counterState, *anypb.Any) error {
+			folded++
+			return nil
+		})
+	book := &pb.EventBook{Cover: &pb.Cover{Domain: "orders"}, Pages: []*pb.EventPage{
+		{Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: TypeURLPrefix + "test.Unknown"}}},
+		{Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: TypeURLPrefix + "test.OrderCreated"}}},
+	}}
+	if _, err := d.Dispatch(book); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if folded != 1 {
+		t.Fatalf("folded = %d, want the declared page after the unknown one to fold", folded)
+	}
+}
+
 // --- Fan-out merge semantics --------------------------------------------------
 
 type notifyingPM struct {
