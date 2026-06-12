@@ -1,0 +1,80 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "ctxloom hook stamp-plan",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "ltk evaluate",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "ctxloom hook session-bind",
+            "type": "command"
+          },
+          {
+            "command": "ctxloom hook inject-context --project '/home/babbitt/workspace/angzarr/client-go/main' --part 1 --of 8 e78cd2450a34507e",
+            "timeout": 60,
+            "type": "command"
+          },
+          {
+            "command": "ctxloom hook inject-context --project '/home/babbitt/workspace/angzarr/client-go/main' --part 2 --of 8 e78cd2450a34507e",
+            "timeout": 60,
+            "type": "command"
+          },
+          {
+            "command": "ctxloom hook inject-context --project '/home/babbitt/workspace/angzarr/client-go/main' --part 3 --of 8 e78cd2450a34507e",
+            "timeout": 60,
+            "type": "command"
+          },
+          {
+            "command": "ctxloom hook inject-context --project '/home/babbitt/workspace/angzarr/client-go/main' --part 4 --of 8 e78cd2450a34507e",
+            "timeout": 60,
+            "type": "command"
+          },
+          {
+            "command": "ctxloom hook inject-context --project '/home/babbitt/workspace/angzarr/client-go/main' --part 5 --of 8 e78cd2450a34507e",
+            "timeout": 60,
+            "type": "command"
+          },
+          {
+            "command": "ctxloom hook inject-context --project '/home/babbitt/workspace/angzarr/client-go/main' --part 6 --of 8 e78cd2450a34507e",
+            "timeout": 60,
+            "type": "command"
+          },
+          {
+            "command": "ctxloom hook inject-context --project '/home/babbitt/workspace/angzarr/client-go/main' --part 7 --of 8 e78cd2450a34507e",
+            "timeout": 60,
+            "type": "command"
+          },
+          {
+            "command": "ctxloom hook inject-context --project '/home/babbitt/workspace/angzarr/client-go/main' --part 8 --of 8 e78cd2450a34507e",
+            "timeout": 60,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "command": "ctxloom hook hud",
+    "type": "command"
+  }
+}

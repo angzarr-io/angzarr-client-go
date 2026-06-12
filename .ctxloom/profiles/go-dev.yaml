@@ -1,0 +1,8 @@
+description: 'Go client dev: gRPC/protobuf, godog BDD, container tooling'
+parents:
+    - https://github.com/benjaminabbitt/ctxloom-personal@profiles/go-developer
+bundles:
+    - https://github.com/ctxloom/ctxloom-default@bundles/bdd
+    - https://github.com/benjaminabbitt/ctxloom-personal@bundles/containers
+    - https://github.com/ctxloom/ctxloom-default@bundles/testing
+    - https://github.com/benjaminabbitt/ctxloom-personal@bundles/behavioral-interface-test

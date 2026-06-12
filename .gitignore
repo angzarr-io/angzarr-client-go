@@ -40,3 +40,21 @@ mutants-reports/
 
 # Stray sub-workspace clones (must not be committed)
 /angzarr/
+
+# ctxloom private working state (synced bundles, session/context, project id)
+*.ctxloom.bak
+.gemini/
+.codex/config.toml
+
+# ctxloom private working state (synced bundles, session/context, project id)
+.ctxloom/ephemeral/
+.ctxloom/project-id
+
+# ctxloom private working state (synced bundles, session/context, project id)
+.agents/
+
+# ctxloom remote/content caches (cloned bundle repos — never committed)
+.ctxloom/cache/
+
+# Machine-local Claude Code overrides
+.claude/settings.local.json
