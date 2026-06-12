@@ -51,8 +51,17 @@ proto: generate-proto
 build: generate-proto
     go build -ldflags '{{LDFLAGS}}' ./...
 
-test: generate-proto
+# Unit hook: in-process engine + unit-client cucumber tier.
+test-unit: generate-proto
     go test -v ./...
+
+# Acceptance hook: drives the angzarr core deployed in kind through the
+# real client. Needs ANGZARR_ACCEPTANCE_ENDPOINT (a port-forward of the
+# cluster's coordinator/gateway) — the suite skips without it.
+test-acceptance: generate-proto
+    go test -v -tags=acceptance -run TestAcceptanceFeatures ./features/ -timeout=600s
+
+test: test-unit
 
 coverage: generate-proto
     go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out

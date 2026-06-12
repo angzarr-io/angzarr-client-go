@@ -36,6 +36,7 @@ _container +ARGS:
             -v "{{ROOT}}/justfile.container:/workspace/justfile:ro" \
             -w /workspace \
             -e DEVCONTAINER=true \
+            -e ANGZARR_ACCEPTANCE_ENDPOINT \
             {{IMAGE}} just {{ARGS}}
     fi
 
@@ -208,6 +209,16 @@ build: generate-proto
 
 test: generate-proto
     just _container test
+
+# Unit hook (in-process engine + unit-client cucumber tier).
+test-unit: generate-proto
+    just _container test-unit
+
+# Acceptance hook: drives the angzarr core deployed in kind via the real
+# client. Export ANGZARR_ACCEPTANCE_ENDPOINT (port-forwarded coordinator)
+# first; _container runs with --network=host so the forward is reachable.
+test-acceptance: generate-proto
+    just _container test-acceptance
 
 # Start gRPC test server for unified Rust harness testing
 serve: generate-proto
