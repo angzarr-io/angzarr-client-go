@@ -26,8 +26,8 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/pluginpb"
 
+	"github.com/angzarr-io/angzarr-cli/codegen"
 	angzarr "github.com/benjaminabbitt/angzarr/client/go"
-	"github.com/benjaminabbitt/angzarr/client/go/internal/codegen"
 	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 )
 
@@ -100,7 +100,7 @@ func runDeclaration(serviceName string, component *pb.ComponentOptions, methods 
 	if err != nil {
 		return err
 	}
-	return codegen.Run(gen)
+	return codegen.Generate(gen, "go")
 }
 
 // ValidationContext holds per-scenario state for validation.feature.
