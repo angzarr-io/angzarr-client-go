@@ -64,6 +64,10 @@ func (c *QueryClientContext) anAggregateWithRootHasEvents(domain, root string, c
 			return err
 		}
 	}
+	// Likewise the speculative loopback coordinator (speculative_client.feature).
+	if currentSpeculative != nil {
+		currentSpeculative.seedShared(domain, root, count)
+	}
 	book := &pb.EventBook{
 		Cover: &pb.Cover{
 			Domain: domain,

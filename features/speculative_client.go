@@ -1,497 +1,714 @@
 package features
 
-import (
-	"fmt"
+// speculative_client.go — step bindings for client/speculative_client.feature,
+// driven through the REAL SpeculativeClient over a loopback gRPC coordinator.
+// The coordinator serves the four speculative RPCs over REAL engine tables
+// (aggregate adapter, SagaDispatch, ProjectorDispatch,
+// ProcessManagerDispatch). Speculation never writes the store, so the
+// no-trace assertions read actual recorded state — nothing is simulated.
 
+import (
+	"context"
+	"fmt"
+	"net"
+	"sync"
+	"time"
+
+	angzarr "github.com/benjaminabbitt/angzarr/client/go"
 	pb "github.com/benjaminabbitt/angzarr/client/go/proto/angzarr_client/proto/angzarr/v1"
 	"github.com/cucumber/godog"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
-	"google.golang.org/protobuf/types/known/emptypb"
 )
 
-// SpeculativeClientContext holds state for speculative execution scenarios
-type SpeculativeClientContext struct {
-	eventBooks           map[string]*pb.EventBook
-	lastResult           *pb.EventBook
-	lastCommands         []*pb.CommandBook
-	lastProjection       interface{}
-	lastError            error
-	speculativeEvents    []*pb.EventPage
-	rejectionReason      string
-	serviceUnavailable   bool
-	editionCreated       bool
-	missingCorrelationID bool
+const (
+	fqSpecCommand = "test.spec.DoThing"
+	fqSpecCancel  = "test.spec.CancelOrder"
+	fqSpecEvent   = "test.spec.ThingHappened"
+	fqSpecShipped = "test.spec.OrderShipped"
+
+	msgCannotCancelShipped = "cannot cancel shipped order"
+	msgMissingCorrelation  = "missing correlation ID"
+	msgMissingParameters   = "missing parameters"
+)
+
+// specState is the event-sourced aggregate state behind the speculative
+// coordinator: a shipped order refuses cancellation.
+type specState struct {
+	shipped bool
 }
 
-func newSpeculativeClientContext() *SpeculativeClientContext {
-	return &SpeculativeClientContext{
-		eventBooks: make(map[string]*pb.EventBook),
+// specBackend is the in-memory store + engine tables the loopback
+// coordinator dispatches through. Speculative paths never write store.
+type specBackend struct {
+	mu    sync.Mutex
+	store map[string]*pb.EventBook
+
+	adapter   *angzarr.AggregateDispatchHandler[*specState]
+	saga      *angzarr.SagaDispatch
+	projector *angzarr.ProjectorDispatch[*specFold]
+	pm        *angzarr.ProcessManagerDispatch[*specState]
+
+	// observability for the Then steps
+	observed  []angzarr.CommandContext // one per aggregate dispatch
+	foldOrder []uint32                 // payload-carried indices, in fold order
+}
+
+// specFold accumulates the projector's fold for order assertions.
+type specFold struct{}
+
+func newSpecBackend() *specBackend {
+	b := &specBackend{store: make(map[string]*pb.EventBook)}
+
+	rebuilder := func() *angzarr.Rebuilder[*specState] {
+		return angzarr.NewRebuilder(func() *specState { return &specState{} }).
+			Apply(fqSpecShipped, func(s *specState, _ *anypb.Any) error {
+				s.shipped = true
+				return nil
+			})
 	}
+
+	table := angzarr.NewAggregateDispatch("spec-orders", "orders", rebuilder()).
+		OnCommand(fqSpecCommand, func(cmdAny *anypb.Any, _ *specState, cctx angzarr.CommandContext) (*pb.EventBook, error) {
+			carrier := &pb.Projection{}
+			if err := proto.Unmarshal(cmdAny.Value, carrier); err != nil {
+				return nil, angzarr.AnyDecodeError(cmdAny.TypeUrl, err)
+			}
+			b.mu.Lock()
+			b.observed = append(b.observed, cctx)
+			b.mu.Unlock()
+			count := carrier.Sequence
+			if count == 0 {
+				count = 1
+			}
+			book := &pb.EventBook{}
+			for i := uint32(0); i < count; i++ {
+				book.Pages = append(book.Pages, &pb.EventPage{
+					Payload: &pb.EventPage_Event{Event: &anypb.Any{TypeUrl: angzarr.TypeURLPrefix + fqSpecEvent}},
+				})
+			}
+			return book, nil
+		}).
+		OnCommand(fqSpecCancel, func(_ *anypb.Any, state *specState, _ angzarr.CommandContext) (*pb.EventBook, error) {
+			if state.shipped {
+				return nil, angzarr.NewPreconditionFailedRejection(
+					angzarr.CodeStatusForbidden, msgCannotCancelShipped, nil)
+			}
+			return &pb.EventBook{}, nil
+		})
+	b.adapter = angzarr.NewAggregateDispatchHandler(table)
+
+	b.saga = angzarr.NewSagaDispatch("order-fulfillment", "orders", "fulfillment").
+		OnEvent(fqSpecEvent, func(*anypb.Any, *angzarr.Destinations) ([]*pb.CommandBook, []*pb.EventBook, error) {
+			return []*pb.CommandBook{{Cover: &pb.Cover{Domain: "fulfillment"}}}, nil, nil
+		})
+
+	b.projector = angzarr.NewProjectorDispatch("order-summary", func() *specFold { return &specFold{} }).
+		ForDomains("orders").
+		OnEvent(fqSpecEvent, func(_ *specFold, eventAny *anypb.Any) error {
+			carrier := &pb.Projection{}
+			if err := proto.Unmarshal(eventAny.Value, carrier); err != nil {
+				return angzarr.AnyDecodeError(eventAny.TypeUrl, err)
+			}
+			b.mu.Lock()
+			b.foldOrder = append(b.foldOrder, carrier.Sequence)
+			b.mu.Unlock()
+			return nil
+		})
+
+	b.pm = angzarr.NewProcessManagerDispatch("order-workflow", "workflow", rebuilder()).
+		OnEvent("orders", fqSpecEvent, func(*anypb.Any, *specState, *angzarr.Destinations) (*pb.ProcessManagerHandleResponse, error) {
+			return &pb.ProcessManagerHandleResponse{Commands: []*pb.CommandBook{
+				{Cover: &pb.Cover{Domain: "payments"}},
+				{Cover: &pb.Cover{Domain: "inventory"}},
+			}}, nil
+		})
+
+	return b
 }
 
-func (c *SpeculativeClientContext) key(domain, root string) string {
-	return domain + "/" + root
+func (b *specBackend) seed(domain string, root []byte, book *pb.EventBook) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.store[bookKey(domain, root)] = book
 }
 
-// Background
-
-func (c *SpeculativeClientContext) aSpeculativeClientConnectedToTheTestBackend() error {
-	return godog.ErrPending
+func (b *specBackend) recorded(domain string, root []byte) *pb.EventBook {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.store[bookKey(domain, root)]
 }
 
-// Aggregate Execution
+// pagesOf builds count event pages of the given type, payloads carrying
+// their index so fold order is observable.
+func pagesOf(fqType string, count int) []*pb.EventPage {
+	pages := make([]*pb.EventPage, 0, count)
+	for i := 0; i < count; i++ {
+		value, _ := proto.Marshal(&pb.Projection{Sequence: uint32(i)})
+		pages = append(pages, &pb.EventPage{
+			Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: uint32(i)}},
+			Payload: &pb.EventPage_Event{Event: &anypb.Any{
+				TypeUrl: angzarr.TypeURLPrefix + fqType,
+				Value:   value,
+			}},
+		})
+	}
+	return pages
+}
 
-func (c *SpeculativeClientContext) anAggregateWithRootHasEvents(domain, root string, count int) error {
-	book := &pb.EventBook{
-		Cover: &pb.Cover{
-			Domain: domain,
-			Root:   &pb.UUID{Value: []byte(root)},
-		},
+func bookOf(domain, root, correlation string, count int) *pb.EventBook {
+	return &pb.EventBook{
+		Cover:        &pb.Cover{Domain: domain, Root: &pb.UUID{Value: []byte(root)}, CorrelationId: correlation},
+		Pages:        pagesOf(fqSpecEvent, count),
 		NextSequence: uint32(count),
 	}
-	for i := 0; i < count; i++ {
-		evt, _ := anypb.New(&emptypb.Empty{})
-		book.Pages = append(book.Pages, &pb.EventPage{
-			Header:  &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: uint32(i)}},
-			Payload: &pb.EventPage_Event{Event: evt},
-		})
+}
+
+// truncateAsOf slices history to pages with sequence <= asOf (the
+// TemporalQuery contract) — the coordinator-side temporal read.
+func truncateAsOf(book *pb.EventBook, asOf uint32) *pb.EventBook {
+	if book == nil {
+		return &pb.EventBook{}
 	}
-	c.eventBooks[c.key(domain, root)] = book
-	return nil
-}
-
-func (c *SpeculativeClientContext) iSpeculativelyExecuteACommandAgainstRoot(domain, root string) error {
-	c.editionCreated = true
-	// Simulate speculative execution returning events
-	evt, _ := anypb.New(&emptypb.Empty{})
-	c.speculativeEvents = []*pb.EventPage{
-		{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: 100}}, Payload: &pb.EventPage_Event{Event: evt}},
+	if asOf+1 >= book.NextSequence {
+		return book
 	}
-	c.lastResult = &pb.EventBook{
-		Cover: &pb.Cover{Domain: domain, Root: &pb.UUID{Value: []byte(root)}},
-		Pages: c.speculativeEvents,
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) theResponseShouldContainTheProjectedEvents() error {
-	if c.lastResult == nil || len(c.lastResult.Pages) == 0 {
-		return fmt.Errorf("expected projected events")
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) theEventsShouldNOTBePersisted() error {
-	// In speculative mode, events are not persisted - this is implicit
-	return nil
-}
-
-func (c *SpeculativeClientContext) iSpeculativelyExecuteACommandAsOfSequence(seq int) error {
-	c.editionCreated = true
-	evt, _ := anypb.New(&emptypb.Empty{})
-	c.speculativeEvents = []*pb.EventPage{
-		{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: uint32(seq + 1)}}, Payload: &pb.EventPage_Event{Event: evt}},
-	}
-	c.lastResult = &pb.EventBook{Pages: c.speculativeEvents}
-	return nil
-}
-
-func (c *SpeculativeClientContext) theCommandShouldExecuteAgainstTheHistoricalState() error {
-	return godog.ErrPending
-}
-
-func (c *SpeculativeClientContext) theResponseShouldReflectStateAtSequence(seq int) error {
-	return godog.ErrPending
-}
-
-func (c *SpeculativeClientContext) anAggregateWithRootInState(domain, root, state string) error {
-	c.eventBooks[c.key(domain, root)] = &pb.EventBook{
-		Cover: &pb.Cover{
-			Domain: domain,
-			Root:   &pb.UUID{Value: []byte(root)},
-		},
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) iSpeculativelyExecuteACommand(commandType string) error {
-	if commandType == "CancelOrder" {
-		c.rejectionReason = "cannot cancel shipped order"
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) theResponseShouldIndicateRejection() error {
-	if c.rejectionReason == "" {
-		return fmt.Errorf("expected rejection")
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) theRejectionReasonShouldBe(reason string) error {
-	if c.rejectionReason != reason {
-		return fmt.Errorf("expected rejection reason %q, got %q", reason, c.rejectionReason)
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) anAggregateWithRoot(domain, root string) error {
-	return c.anAggregateWithRootHasEvents(domain, root, 0)
-}
-
-func (c *SpeculativeClientContext) iSpeculativelyExecuteACommandWithInvalidPayload() error {
-	c.lastError = fmt.Errorf("validation error: invalid payload")
-	return nil
-}
-
-func (c *SpeculativeClientContext) theOperationShouldFailWithValidationError() error {
-	if c.lastError == nil {
-		return fmt.Errorf("expected validation error")
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) noEventsShouldBeProduced() error {
-	if len(c.speculativeEvents) > 0 {
-		return fmt.Errorf("expected no events")
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) iSpeculativelyExecuteACommand2() error {
-	c.editionCreated = true
-	evt, _ := anypb.New(&emptypb.Empty{})
-	c.speculativeEvents = []*pb.EventPage{
-		{Header: &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: 0}}, Payload: &pb.EventPage_Event{Event: evt}},
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) anEditionShouldBeCreatedForTheSpeculation() error {
-	if !c.editionCreated {
-		return fmt.Errorf("expected edition to be created")
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) theEditionShouldBeDiscardedAfterExecution() error {
-	return nil // Edition is always discarded after speculative execution
-}
-
-// Projector Execution
-
-func (c *SpeculativeClientContext) eventsForRoot(domain, root string) error {
-	return c.anAggregateWithRootHasEvents(domain, root, 3)
-}
-
-func (c *SpeculativeClientContext) iSpeculativelyExecuteProjectorAgainstThoseEvents(projector string) error {
-	c.lastProjection = map[string]interface{}{"total": 100}
-	return nil
-}
-
-func (c *SpeculativeClientContext) theResponseShouldContainTheProjection() error {
-	if c.lastProjection == nil {
-		return fmt.Errorf("expected projection")
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) noExternalSystemsShouldBeUpdated() error {
-	return nil // Speculative projections don't update external systems
-}
-
-func (c *SpeculativeClientContext) eventsForRootCount(count int, domain, root string) error {
-	return c.anAggregateWithRootHasEvents(domain, root, count)
-}
-
-func (c *SpeculativeClientContext) iSpeculativelyExecuteProjector(projector string) error {
-	c.lastProjection = map[string]interface{}{"processed": 5}
-	return nil
-}
-
-func (c *SpeculativeClientContext) theProjectorShouldProcessAllEventsInOrder(count int) error {
-	return godog.ErrPending
-}
-
-func (c *SpeculativeClientContext) theFinalProjectionStateShouldBeReturned() error {
-	if c.lastProjection == nil {
-		return fmt.Errorf("expected final projection state")
-	}
-	return nil
-}
-
-// Saga Execution
-
-func (c *SpeculativeClientContext) iSpeculativelyExecuteSaga(saga string) error {
-	c.lastCommands = []*pb.CommandBook{
-		{Cover: &pb.Cover{Domain: "fulfillment"}},
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) theResponseShouldContainTheCommandsTheSagaWouldEmit() error {
-	if len(c.lastCommands) == 0 {
-		return fmt.Errorf("expected commands")
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) theCommandsShouldNOTBeSentToTheTargetDomain() error {
-	return nil // Speculative commands are never sent
-}
-
-func (c *SpeculativeClientContext) eventsWithSagaOriginFromAggregate(domain string) error {
-	return godog.ErrPending
-}
-
-func (c *SpeculativeClientContext) theResponseShouldPreserveTheSagaOriginChain() error {
-	return godog.ErrPending
-}
-
-// Process Manager Execution
-
-func (c *SpeculativeClientContext) correlatedEventsFromMultipleDomains() error {
-	return godog.ErrPending
-}
-
-func (c *SpeculativeClientContext) iSpeculativelyExecuteProcessManager(pm string) error {
-	if c.missingCorrelationID {
-		c.lastError = fmt.Errorf("missing correlation ID")
-		return nil
-	}
-	c.lastCommands = []*pb.CommandBook{
-		{Cover: &pb.Cover{Domain: "orders"}},
-		{Cover: &pb.Cover{Domain: "inventory"}},
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) theResponseShouldContainThePMsCommandDecisions() error {
-	if len(c.lastCommands) == 0 {
-		return fmt.Errorf("expected PM command decisions")
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) theCommandsShouldNOTBeExecuted() error {
-	return godog.ErrPending
-}
-
-func (c *SpeculativeClientContext) eventsWithoutCorrelationID() error {
-	c.missingCorrelationID = true
-	return nil
-}
-
-func (c *SpeculativeClientContext) theOperationShouldFail() error {
-	if c.lastError == nil {
-		c.lastError = fmt.Errorf("missing correlation ID")
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) theSpeculativePMOperationShouldFail() error {
-	if c.lastError == nil {
-		return fmt.Errorf("expected operation to fail")
-	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) theErrorShouldIndicateMissingCorrelationID() error {
-	return godog.ErrPending
-}
-
-// State Isolation
-
-func (c *SpeculativeClientContext) aSpeculativeAggregateWithRootHasEvents(domain, root string, count int) error {
-	events := make([]*pb.EventPage, count)
-	for i := 0; i < count; i++ {
-		evt, _ := anypb.New(&emptypb.Empty{})
-		events[i] = &pb.EventPage{
-			Header:  &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: uint32(i)}},
-			Payload: &pb.EventPage_Event{Event: evt},
+	out := &pb.EventBook{Cover: book.Cover, NextSequence: asOf + 1}
+	for _, page := range book.Pages {
+		if page.GetHeader().GetSequence() <= asOf {
+			out.Pages = append(out.Pages, page)
 		}
 	}
-	c.eventBooks[c.key(domain, root)] = &pb.EventBook{
-		Cover: &pb.Cover{Domain: domain, Root: &pb.UUID{Value: []byte(root)}},
-		Pages: events,
+	return out
+}
+
+// --- loopback coordinator servers (one per service; only the speculative
+// rpcs are real — everything else stays Unimplemented) ---
+
+type specCHServer struct {
+	pb.UnimplementedCommandHandlerCoordinatorServiceServer
+	backend *specBackend
+}
+
+func (s *specCHServer) HandleSyncSpeculative(ctx context.Context, req *pb.SpeculateCommandHandlerRequest) (*pb.CommandResponse, error) {
+	cmd := req.GetCommand()
+	if cmd == nil || len(cmd.GetPages()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, msgMissingParameters)
 	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) iVerifyTheRealEventsForRoot(domain, root string) error {
-	if book, ok := c.eventBooks[c.key(domain, root)]; ok {
-		c.lastResult = book
-	} else {
-		c.lastResult = &pb.EventBook{}
+	cover := cmd.GetCover()
+	history := s.backend.recorded(cover.GetDomain(), cover.GetRoot().GetValue())
+	if history == nil {
+		history = &pb.EventBook{Cover: cover}
 	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) iSpeculativelyExecuteACommandProducingEvents(count int) error {
-	c.editionCreated = true
-	for i := 0; i < count; i++ {
-		evt, _ := anypb.New(&emptypb.Empty{})
-		c.speculativeEvents = append(c.speculativeEvents, &pb.EventPage{
-			Header:  &pb.PageHeader{SequenceType: &pb.PageHeader_Sequence{Sequence: uint32(i)}},
-			Payload: &pb.EventPage_Event{Event: evt},
-		})
+	if seq, ok := req.GetPointInTime().GetPointInTime().(*pb.TemporalQuery_AsOfSequence); ok {
+		history = truncateAsOf(history, seq.AsOfSequence)
 	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) iQueryEventsForRoot(domain, root string) error {
-	if book, ok := c.eventBooks[c.key(domain, root)]; ok {
-		c.lastResult = book
-	} else {
-		c.lastResult = &pb.EventBook{}
+	resp, err := s.backend.adapter.Handle(ctx, &pb.ContextualCommand{Command: cmd, Events: history})
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	// Projected only — the store is never written on the speculative path.
+	return &pb.CommandResponse{Events: resp.GetEvents()}, nil
 }
 
-func (c *SpeculativeClientContext) iShouldReceiveOnlyEvents(count int) error {
-	if c.lastResult == nil {
-		return fmt.Errorf("no result")
+type specSagaServer struct {
+	pb.UnimplementedSagaCoordinatorServiceServer
+	backend *specBackend
+}
+
+func (s *specSagaServer) ExecuteSpeculative(_ context.Context, req *pb.SpeculateSagaRequest) (*pb.SagaResponse, error) {
+	return s.backend.saga.Dispatch(req.GetRequest().GetSource(), req.GetRequest().GetDestinationSequences())
+}
+
+type specProjectorServer struct {
+	pb.UnimplementedProjectorCoordinatorServiceServer
+	backend *specBackend
+}
+
+func (s *specProjectorServer) HandleSpeculative(_ context.Context, req *pb.SpeculateProjectorRequest) (*pb.Projection, error) {
+	return s.backend.projector.Dispatch(req.GetEvents())
+}
+
+type specPMServer struct {
+	pb.UnimplementedProcessManagerCoordinatorServiceServer
+	backend *specBackend
+}
+
+func (s *specPMServer) HandleSpeculative(_ context.Context, req *pb.SpeculatePmRequest) (*pb.ProcessManagerHandleResponse, error) {
+	trigger := req.GetRequest().GetTrigger()
+	// Process state is keyed by correlation — a trigger without one is
+	// unroutable and refused before dispatch.
+	if trigger.GetCover().GetCorrelationId() == "" {
+		return nil, status.Error(codes.InvalidArgument, msgMissingCorrelation)
 	}
-	if len(c.lastResult.Pages) != count {
-		return fmt.Errorf("expected %d events, got %d", count, len(c.lastResult.Pages))
+	return s.backend.pm.Dispatch(trigger, req.GetRequest().GetProcessState(), req.GetRequest().GetDestinationSequences())
+}
+
+// SpeculativeClientContext holds per-scenario state.
+type SpeculativeClientContext struct {
+	backend *specBackend
+	server  *grpc.Server
+	conn    *grpc.ClientConn
+	client  *angzarr.SpeculativeClient
+
+	domain string
+	root   string
+
+	cmdResp  *pb.CommandResponse
+	sagaResp *pb.SagaResponse
+	pmResp   *pb.ProcessManagerHandleResponse
+	projResp *pb.Projection
+	lastErr  error
+
+	trigger    *pb.EventBook // saga/PM source under test
+	eventCount int           // seeded projector/saga event count
+}
+
+// currentSpeculative lets the shared seeding phrase (query_client.go) feed
+// this harness's live backend too.
+var currentSpeculative *SpeculativeClientContext
+
+func newSpeculativeClientContext() *SpeculativeClientContext {
+	c := &SpeculativeClientContext{}
+	currentSpeculative = c
+	return c
+}
+
+// seedShared mirrors domain_client.seedFromShared for the shared
+// `an aggregate ... has N events` phrase.
+func (c *SpeculativeClientContext) seedShared(domain, root string, count int) {
+	if c.backend == nil {
+		return
 	}
-	return nil
+	c.domain, c.root = domain, root
+	c.backend.seed(domain, []byte(root), bookOf(domain, root, "", count))
 }
 
-func (c *SpeculativeClientContext) theSpeculativeEventsShouldNotBePresent() error {
-	// Speculative events are never persisted
-	return nil
-}
-
-func (c *SpeculativeClientContext) iSpeculativelyExecuteCommandA() error {
-	return c.iSpeculativelyExecuteACommand2()
-}
-
-func (c *SpeculativeClientContext) iSpeculativelyExecuteCommandB() error {
-	return c.iSpeculativelyExecuteACommand2()
-}
-
-func (c *SpeculativeClientContext) eachSpeculationShouldStartFromTheSameBaseState() error {
-	return godog.ErrPending
-}
-
-func (c *SpeculativeClientContext) resultsShouldBeIndependent() error {
-	return godog.ErrPending
-}
-
-// Error Handling
-
-func (c *SpeculativeClientContext) theSpeculativeServiceIsUnavailable() error {
-	c.serviceUnavailable = true
-	return nil
-}
-
-func (c *SpeculativeClientContext) iAttemptSpeculativeExecution() error {
-	if c.serviceUnavailable {
-		c.lastError = fmt.Errorf("connection error")
+func (c *SpeculativeClientContext) startSurface() error {
+	if c.server != nil {
+		return nil
 	}
-	return nil
-}
-
-func (c *SpeculativeClientContext) theOperationShouldFailWithConnectionError() error {
-	if c.lastError == nil {
-		return fmt.Errorf("expected connection error")
+	c.backend = newSpecBackend()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
 	}
-	return nil
-}
+	c.server = grpc.NewServer()
+	pb.RegisterCommandHandlerCoordinatorServiceServer(c.server, &specCHServer{backend: c.backend})
+	pb.RegisterSagaCoordinatorServiceServer(c.server, &specSagaServer{backend: c.backend})
+	pb.RegisterProjectorCoordinatorServiceServer(c.server, &specProjectorServer{backend: c.backend})
+	pb.RegisterProcessManagerCoordinatorServiceServer(c.server, &specPMServer{backend: c.backend})
+	go func() { _ = c.server.Serve(listener) }()
 
-func (c *SpeculativeClientContext) iAttemptSpeculativeExecutionWithMissingParameters() error {
-	c.lastError = fmt.Errorf("invalid argument: missing parameters")
-	return nil
-}
-
-func (c *SpeculativeClientContext) theOperationShouldFailWithInvalidArgumentError() error {
-	if c.lastError == nil {
-		return fmt.Errorf("expected invalid argument error")
+	c.conn, err = grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return err
 	}
+	c.client = angzarr.SpeculativeClientFromChannel(c.conn)
 	return nil
 }
 
+func (c *SpeculativeClientContext) stop() {
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
+	if c.server != nil {
+		c.server.Stop()
+	}
+	if currentSpeculative == c {
+		currentSpeculative = nil
+	}
+}
+
+func (c *SpeculativeClientContext) ctx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 2*time.Second)
+}
+
+func (c *SpeculativeClientContext) speculateCommand(cmdType string, producing uint32, pointInTime *pb.TemporalQuery) error {
+	value, _ := proto.Marshal(&pb.Projection{Sequence: producing})
+	cmd := &pb.CommandBook{
+		Cover: &pb.Cover{Domain: c.domain, Root: &pb.UUID{Value: []byte(c.root)}},
+		Pages: []*pb.CommandPage{
+			{Payload: &pb.CommandPage_Command{Command: &anypb.Any{
+				TypeUrl: angzarr.TypeURLPrefix + cmdType,
+				Value:   value,
+			}}},
+		},
+	}
+	ctx, cancel := c.ctx()
+	defer cancel()
+	c.cmdResp, c.lastErr = c.client.CommandHandler(ctx, &pb.SpeculateCommandHandlerRequest{
+		Command:     cmd,
+		PointInTime: pointInTime,
+	})
+	return nil
+}
+
+// InitSpeculativeClientSteps registers speculative_client.feature steps.
 func InitSpeculativeClientSteps(ctx *godog.ScenarioContext) {
 	c := newSpeculativeClientContext()
+	ctx.After(func(scCtx context.Context, _ *godog.Scenario, _ error) (context.Context, error) {
+		c.stop()
+		return scCtx, nil
+	})
 
-	// Background
-	ctx.Step(`^a SpeculativeClient connected to the test backend$`, c.aSpeculativeClientConnectedToTheTestBackend)
+	// --- Background ---
+	ctx.Step(`^a what-if execution surface available$`, c.startSurface)
 
-	// Aggregate Execution
-	// Note: "an aggregate ... has ... events" is registered by QueryClientContext
-	ctx.Step(`^I speculatively execute a command against "([^"]*)" root "([^"]*)"$`, c.iSpeculativelyExecuteACommandAgainstRoot)
-	ctx.Step(`^the response should contain the projected events$`, c.theResponseShouldContainTheProjectedEvents)
-	ctx.Step(`^the events should NOT be persisted$`, c.theEventsShouldNOTBePersisted)
-	ctx.Step(`^I speculatively execute a command as of sequence (\d+)$`, c.iSpeculativelyExecuteACommandAsOfSequence)
-	ctx.Step(`^the command should execute against the historical state$`, c.theCommandShouldExecuteAgainstTheHistoricalState)
-	ctx.Step(`^the response should reflect state at sequence (\d+)$`, c.theResponseShouldReflectStateAtSequence)
-	ctx.Step(`^an aggregate "([^"]*)" with root "([^"]*)" in state "([^"]*)"$`, c.anAggregateWithRootInState)
-	ctx.Step(`^I speculatively execute a "([^"]*)" command$`, c.iSpeculativelyExecuteACommand)
-	ctx.Step(`^the response should indicate rejection$`, c.theResponseShouldIndicateRejection)
-	ctx.Step(`^the rejection reason should be "([^"]*)"$`, c.theRejectionReasonShouldBe)
-	// Step "an aggregate ... with root ..." handled by AggregateClientContext (InitAggregateClientSteps registered earlier in InitializeScenario)
-	ctx.Step(`^I speculatively execute a command with invalid payload$`, c.iSpeculativelyExecuteACommandWithInvalidPayload)
-	ctx.Step(`^the operation should fail with validation error$`, c.theOperationShouldFailWithValidationError)
-	ctx.Step(`^no events should be produced$`, c.noEventsShouldBeProduced)
-	ctx.Step(`^I speculatively execute a command$`, c.iSpeculativelyExecuteACommand2)
-	ctx.Step(`^an edition should be created for the speculation$`, c.anEditionShouldBeCreatedForTheSpeculation)
-	ctx.Step(`^the edition should be discarded after execution$`, c.theEditionShouldBeDiscardedAfterExecution)
-
-	// Projector Execution
-	ctx.Step(`^events for "([^"]*)" root "([^"]*)"$`, c.eventsForRoot)
-	ctx.Step(`^I speculatively execute projector "([^"]*)" against those events$`, c.iSpeculativelyExecuteProjectorAgainstThoseEvents)
-	ctx.Step(`^the response should contain the projection$`, c.theResponseShouldContainTheProjection)
-	ctx.Step(`^no external systems should be updated$`, c.noExternalSystemsShouldBeUpdated)
-	ctx.Step(`^(\d+) events for "([^"]*)" root "([^"]*)"$`, c.eventsForRootCount)
-	ctx.Step(`^I speculatively execute projector "([^"]*)"$`, c.iSpeculativelyExecuteProjector)
-	ctx.Step(`^the projector should process all (\d+) events in order$`, c.theProjectorShouldProcessAllEventsInOrder)
-	ctx.Step(`^the final projection state should be returned$`, c.theFinalProjectionStateShouldBeReturned)
-
-	// Saga Execution
-	ctx.Step(`^I speculatively execute saga "([^"]*)"$`, c.iSpeculativelyExecuteSaga)
-	ctx.Step(`^the response should contain the commands the saga would emit$`, c.theResponseShouldContainTheCommandsTheSagaWouldEmit)
-	ctx.Step(`^the commands should NOT be sent to the target domain$`, c.theCommandsShouldNOTBeSentToTheTargetDomain)
-	ctx.Step(`^events with saga origin from "([^"]*)" aggregate$`, c.eventsWithSagaOriginFromAggregate)
-	ctx.Step(`^the response should preserve the saga origin chain$`, c.theResponseShouldPreserveTheSagaOriginChain)
-
-	// Process Manager Execution
-	ctx.Step(`^correlated events from multiple domains$`, c.correlatedEventsFromMultipleDomains)
-	ctx.Step(`^I speculatively execute process manager "([^"]*)"$`, c.iSpeculativelyExecuteProcessManager)
-	ctx.Step(`^the response should contain the PM's command decisions$`, c.theResponseShouldContainThePMsCommandDecisions)
-	ctx.Step(`^the commands should NOT be executed$`, c.theCommandsShouldNOTBeExecuted)
-	ctx.Step(`^events without correlation ID$`, c.eventsWithoutCorrelationID)
-	ctx.Step(`^the speculative PM operation should fail$`, c.theSpeculativePMOperationShouldFail)
-	ctx.Step(`^the error should indicate missing correlation ID$`, c.theErrorShouldIndicateMissingCorrelationID)
-
-	// State Isolation
-	ctx.Step(`^a speculative aggregate "([^"]*)" with root "([^"]*)" has (\d+) events$`, c.aSpeculativeAggregateWithRootHasEvents)
-	ctx.Step(`^I speculatively execute a command producing (\d+) events$`, c.iSpeculativelyExecuteACommandProducingEvents)
-	ctx.Step(`^I verify the real events for "([^"]*)" root "([^"]*)"$`, c.iVerifyTheRealEventsForRoot)
-	ctx.Step(`^I should receive only (\d+) events$`, c.iShouldReceiveOnlyEvents)
-	ctx.Step(`^the speculative events should not be present$`, c.theSpeculativeEventsShouldNotBePresent)
-	ctx.Step(`^I speculatively execute command A$`, c.iSpeculativelyExecuteCommandA)
-	ctx.Step(`^I speculatively execute command B$`, c.iSpeculativelyExecuteCommandB)
-	ctx.Step(`^each speculation should start from the same base state$`, c.eachSpeculationShouldStartFromTheSameBaseState)
-	ctx.Step(`^results should be independent$`, c.resultsShouldBeIndependent)
-
-	// Error Handling
-	ctx.Step(`^the speculative service is unavailable$`, c.theSpeculativeServiceIsUnavailable)
-	ctx.Step(`^I attempt speculative execution$`, c.iAttemptSpeculativeExecution)
-	ctx.Step(`^the speculative operation should fail with connection error$`, c.theOperationShouldFailWithConnectionError)
-	ctx.Step(`^I attempt speculative execution with missing parameters$`, c.iAttemptSpeculativeExecutionWithMissingParameters)
-	ctx.Step(`^the speculative operation should fail with invalid argument error$`, c.theOperationShouldFailWithInvalidArgumentError)
-
-	// --- New (Batch 6+7) phrases from the rewritten speculative_client.feature ---
-	// "SpeculativeClient connected to the test backend" → "what-if execution
-	// surface available", new isolation phrasing "the projected execution
-	// leaves no trace". Stubs FAIL until wired through to real assertions.
-
-	ctx.Step(`^a what-if execution surface available$`, func() error {
-		// The speculative harness is the surface; nothing to provision.
+	// --- Speculative aggregate execution ---
+	// `an aggregate ... has N events` is the shared seeding phrase
+	// (query_client.go); it feeds this backend via currentSpeculative.
+	ctx.Step(`^I speculatively execute a command against "([^"]*)" root "([^"]*)"$`, func(domain, root string) error {
+		c.domain, c.root = domain, root
+		return c.speculateCommand(fqSpecCommand, 1, nil)
+	})
+	ctx.Step(`^the response should contain the projected events$`, func() error {
+		if c.lastErr != nil {
+			return fmt.Errorf("speculation failed: %v", c.lastErr)
+		}
+		if len(c.cmdResp.GetEvents().GetPages()) == 0 {
+			return fmt.Errorf("expected projected events in the response")
+		}
 		return nil
 	})
-	ctx.Step(`^the projected execution leaves no trace$`, func() error {
-		return c.theEventsShouldNOTBePersisted()
+	ctx.Step(`^the events should NOT be persisted$`, c.thenStoreUnchanged)
+	ctx.Step(`^the projected execution leaves no trace$`, c.thenStoreUnchanged)
+
+	ctx.Step(`^I speculatively execute a command as of sequence (\d+)$`, func(seq int) error {
+		return c.speculateCommand(fqSpecCommand, 1, &pb.TemporalQuery{
+			PointInTime: &pb.TemporalQuery_AsOfSequence{AsOfSequence: uint32(seq)},
+		})
 	})
+	ctx.Step(`^the command should execute against the historical state$`, func() error {
+		if c.lastErr != nil {
+			return fmt.Errorf("speculation failed: %v", c.lastErr)
+		}
+		if n := len(c.backend.observed); n == 0 {
+			return fmt.Errorf("the command never reached the handler seam")
+		}
+		return nil
+	})
+	ctx.Step(`^the response should reflect state at sequence (\d+)$`, func(seq int) error {
+		// AsOfSequence is inclusive: state through event seq, so the next
+		// projected event lands at seq+1 — both the rebuild input and the
+		// engine's fill-only stamping must agree.
+		want := uint32(seq + 1)
+		last := c.backend.observed[len(c.backend.observed)-1]
+		if last.NextSequence != want {
+			return fmt.Errorf("handler saw NextSequence %d, want %d (state through sequence %d)", last.NextSequence, want, seq)
+		}
+		got := c.cmdResp.GetEvents().GetPages()
+		if len(got) == 0 || got[0].GetHeader().GetSequence() != want {
+			return fmt.Errorf("projected events stamped from %d, want %d", got[0].GetHeader().GetSequence(), want)
+		}
+		return nil
+	})
+
+	ctx.Step(`^an aggregate "([^"]*)" with root "([^"]*)" in state "([^"]*)"$`, func(domain, root, state string) error {
+		if state != "shipped" {
+			return fmt.Errorf("unknown fixture state %q", state)
+		}
+		c.domain, c.root = domain, root
+		book := &pb.EventBook{
+			Cover:        &pb.Cover{Domain: domain, Root: &pb.UUID{Value: []byte(root)}},
+			Pages:        pagesOf(fqSpecShipped, 1),
+			NextSequence: 1,
+		}
+		c.backend.seed(domain, []byte(root), book)
+		return nil
+	})
+	ctx.Step(`^I speculatively execute a "([^"]*)" command$`, func(cmdType string) error {
+		if cmdType != "CancelOrder" {
+			return fmt.Errorf("unknown fixture command %q", cmdType)
+		}
+		return c.speculateCommand(fqSpecCancel, 0, nil)
+	})
+	ctx.Step(`^the response should indicate rejection$`, func() error {
+		clientErr := angzarr.AsClientError(c.lastErr)
+		if clientErr == nil {
+			return fmt.Errorf("expected a rejection, got resp=%v err=%v", c.cmdResp, c.lastErr)
+		}
+		return nil
+	})
+	ctx.Step(`^the rejection reason should be "([^"]*)"$`, func(reason string) error {
+		clientErr := angzarr.AsClientError(c.lastErr)
+		if clientErr == nil || clientErr.Status().Message() != reason {
+			return fmt.Errorf("rejection reason = %v, want %q", c.lastErr, reason)
+		}
+		return nil
+	})
+
+	ctx.Step(`^I speculatively execute a command with invalid payload$`, func() error {
+		ctxx, cancel := c.ctx()
+		defer cancel()
+		c.cmdResp, c.lastErr = c.client.CommandHandler(ctxx, &pb.SpeculateCommandHandlerRequest{
+			Command: &pb.CommandBook{
+				Cover: &pb.Cover{Domain: c.domain, Root: &pb.UUID{Value: []byte(c.root)}},
+				Pages: []*pb.CommandPage{
+					{Payload: &pb.CommandPage_Command{Command: &anypb.Any{
+						TypeUrl: angzarr.TypeURLPrefix + fqSpecCommand,
+						Value:   []byte{0xFF, 0xFF, 0xFF, 0xFF},
+					}}},
+				},
+			},
+		})
+		return nil
+	})
+	ctx.Step(`^the operation should fail with validation error$`, func() error {
+		clientErr := angzarr.AsClientError(c.lastErr)
+		if clientErr == nil || !clientErr.IsInvalidArgument() {
+			return fmt.Errorf("expected an invalid-argument failure, got %v", c.lastErr)
+		}
+		return nil
+	})
+	ctx.Step(`^no events should be produced$`, func() error {
+		if len(c.cmdResp.GetEvents().GetPages()) != 0 {
+			return fmt.Errorf("expected no projected events, got %d", len(c.cmdResp.GetEvents().GetPages()))
+		}
+		return nil
+	})
+	ctx.Step(`^I speculatively execute a command$`, func() error {
+		return c.speculateCommand(fqSpecCommand, 1, nil)
+	})
+
+	// --- Speculative projector execution ---
+	ctx.Step(`^events for "([^"]*)" root "([^"]*)"$`, func(domain, root string) error {
+		c.domain, c.root, c.eventCount = domain, root, 3
+		c.trigger = bookOf(domain, root, "", 3)
+		return nil
+	})
+	ctx.Step(`^(\d+) events for "([^"]*)" root "([^"]*)"$`, func(count int, domain, root string) error {
+		c.domain, c.root, c.eventCount = domain, root, count
+		c.trigger = bookOf(domain, root, "", count)
+		return nil
+	})
+	ctx.Step(`^I speculatively execute projector "([^"]*)" against those events$`, c.speculateProjector)
+	ctx.Step(`^I speculatively execute projector "([^"]*)"$`, c.speculateProjector)
+	ctx.Step(`^the response should contain the projection$`, func() error {
+		if c.lastErr != nil || c.projResp == nil {
+			return fmt.Errorf("expected a projection, got %v", c.lastErr)
+		}
+		return nil
+	})
+	ctx.Step(`^no external systems should be updated$`, c.thenStoreUnchanged)
+	ctx.Step(`^the projector should process all (\d+) events in order$`, func(count int) error {
+		c.backend.mu.Lock()
+		defer c.backend.mu.Unlock()
+		if len(c.backend.foldOrder) != count {
+			return fmt.Errorf("folded %d events, want %d", len(c.backend.foldOrder), count)
+		}
+		for i, got := range c.backend.foldOrder {
+			if got != uint32(i) {
+				return fmt.Errorf("fold order %v, want ascending from 0", c.backend.foldOrder)
+			}
+		}
+		return nil
+	})
+	ctx.Step(`^the final projection state should be returned$`, func() error {
+		if c.projResp == nil {
+			return fmt.Errorf("no projection returned")
+		}
+		return nil
+	})
+
+	// --- Speculative saga execution ---
+	ctx.Step(`^I speculatively execute saga "([^"]*)"$`, func(string) error {
+		ctxx, cancel := c.ctx()
+		defer cancel()
+		c.sagaResp, c.lastErr = c.client.Saga(ctxx, &pb.SpeculateSagaRequest{
+			Request: &pb.SagaHandleRequest{Source: c.trigger},
+		})
+		return nil
+	})
+	ctx.Step(`^the response should contain the commands the saga would emit$`, func() error {
+		if c.lastErr != nil || len(c.sagaResp.GetCommands()) == 0 {
+			return fmt.Errorf("expected emitted commands, got %v (err %v)", c.sagaResp, c.lastErr)
+		}
+		return nil
+	})
+	ctx.Step(`^the commands should NOT be sent to the target domain$`, func() error {
+		if book := c.backend.recorded("fulfillment", nil); book != nil {
+			return fmt.Errorf("speculative saga commands reached the target domain's store")
+		}
+		return nil
+	})
+	ctx.Step(`^events with saga origin from "([^"]*)" aggregate$`, func(origin string) error {
+		c.trigger = bookOf("orders", "order-origin", "origin:"+origin, 1)
+		return nil
+	})
+	ctx.Step(`^the response should preserve the saga origin chain$`, func() error {
+		if c.lastErr != nil || len(c.sagaResp.GetCommands()) == 0 {
+			return fmt.Errorf("no commands to carry the chain (err %v)", c.lastErr)
+		}
+		want := c.trigger.GetCover().GetCorrelationId()
+		for _, cmd := range c.sagaResp.GetCommands() {
+			if cmd.GetCover().GetCorrelationId() != want {
+				return fmt.Errorf("command correlation = %q, want the origin chain %q",
+					cmd.GetCover().GetCorrelationId(), want)
+			}
+		}
+		return nil
+	})
+
+	// --- Speculative process manager execution ---
+	ctx.Step(`^correlated events from multiple domains$`, func() error {
+		c.trigger = bookOf("orders", "order-pm", "workflow-9", 1)
+		return nil
+	})
+	ctx.Step(`^events without correlation ID$`, func() error {
+		c.trigger = bookOf("orders", "order-pm", "", 1)
+		return nil
+	})
+	ctx.Step(`^I speculatively execute process manager "([^"]*)"$`, func(string) error {
+		ctxx, cancel := c.ctx()
+		defer cancel()
+		c.pmResp, c.lastErr = c.client.ProcessManager(ctxx, &pb.SpeculatePmRequest{
+			Request: &pb.ProcessManagerHandleRequest{Trigger: c.trigger},
+		})
+		return nil
+	})
+	ctx.Step(`^the response should contain the PM's command decisions$`, func() error {
+		if c.lastErr != nil || len(c.pmResp.GetCommands()) == 0 {
+			return fmt.Errorf("expected PM command decisions, got %v (err %v)", c.pmResp, c.lastErr)
+		}
+		return nil
+	})
+	ctx.Step(`^the commands should NOT be executed$`, func() error {
+		for _, domain := range []string{"payments", "inventory"} {
+			if book := c.backend.recorded(domain, nil); book != nil {
+				return fmt.Errorf("speculative PM commands reached %q", domain)
+			}
+		}
+		return nil
+	})
+	ctx.Step(`^the speculative PM operation should fail$`, func() error {
+		if c.lastErr == nil {
+			return fmt.Errorf("expected the PM speculation to fail")
+		}
+		return nil
+	})
+	ctx.Step(`^the error should indicate missing correlation ID$`, func() error {
+		clientErr := angzarr.AsClientError(c.lastErr)
+		if clientErr == nil || clientErr.Status().Message() != msgMissingCorrelation {
+			return fmt.Errorf("error = %v, want %q", c.lastErr, msgMissingCorrelation)
+		}
+		return nil
+	})
+
+	// --- State isolation ---
+	ctx.Step(`^a speculative aggregate "([^"]*)" with root "([^"]*)" has (\d+) events$`, func(domain, root string, count int) error {
+		c.seedShared(domain, root, count)
+		return nil
+	})
+	ctx.Step(`^I speculatively execute a command producing (\d+) events$`, func(count int) error {
+		return c.speculateCommand(fqSpecCommand, uint32(count), nil)
+	})
+	ctx.Step(`^I verify the real events for "([^"]*)" root "([^"]*)"$`, func(domain, root string) error {
+		return nil // assertion reads the store directly
+	})
+	ctx.Step(`^I should receive only (\d+) events$`, func(count int) error {
+		book := c.backend.recorded(c.domain, []byte(c.root))
+		if got := len(book.GetPages()); got != count {
+			return fmt.Errorf("real store has %d events, want %d", got, count)
+		}
+		return nil
+	})
+	ctx.Step(`^the speculative events should not be present$`, func() error {
+		book := c.backend.recorded(c.domain, []byte(c.root))
+		for _, page := range book.GetPages() {
+			if page.GetHeader().GetSequence() >= book.GetNextSequence() {
+				return fmt.Errorf("speculative page leaked into the real store at sequence %d", page.GetHeader().GetSequence())
+			}
+		}
+		return nil
+	})
+	ctx.Step(`^I speculatively execute command A$`, func() error {
+		return c.speculateCommand(fqSpecCommand, 1, nil)
+	})
+	ctx.Step(`^I speculatively execute command B$`, func() error {
+		return c.speculateCommand(fqSpecCommand, 1, nil)
+	})
+	ctx.Step(`^each speculation should start from the same base state$`, func() error {
+		c.backend.mu.Lock()
+		defer c.backend.mu.Unlock()
+		if len(c.backend.observed) != 2 {
+			return fmt.Errorf("observed %d dispatches, want 2", len(c.backend.observed))
+		}
+		if c.backend.observed[0].NextSequence != c.backend.observed[1].NextSequence {
+			return fmt.Errorf("speculations saw different base states: %d vs %d — the first leaked into the second",
+				c.backend.observed[0].NextSequence, c.backend.observed[1].NextSequence)
+		}
+		return nil
+	})
+	ctx.Step(`^results should be independent$`, func() error {
+		got := c.cmdResp.GetEvents().GetPages()
+		base := c.backend.observed[0].NextSequence
+		if len(got) == 0 || got[0].GetHeader().GetSequence() != base {
+			return fmt.Errorf("second speculation stamped from %d, want the shared base %d", got[0].GetHeader().GetSequence(), base)
+		}
+		return nil
+	})
+
+	// --- Error handling ---
+	ctx.Step(`^the speculative service is unavailable$`, func() error {
+		if err := c.startSurface(); err != nil {
+			return err
+		}
+		c.server.Stop()
+		return nil
+	})
+	ctx.Step(`^I attempt speculative execution$`, func() error {
+		c.domain, c.root = "orders", "any"
+		return c.speculateCommand(fqSpecCommand, 1, nil)
+	})
+	ctx.Step(`^the speculative operation should fail with connection error$`, func() error {
+		clientErr := angzarr.AsClientError(c.lastErr)
+		if clientErr == nil || clientErr.GRPCCode() != codes.Unavailable {
+			return fmt.Errorf("expected an unavailable failure, got %v", c.lastErr)
+		}
+		return nil
+	})
+	ctx.Step(`^I attempt speculative execution with missing parameters$`, func() error {
+		ctxx, cancel := c.ctx()
+		defer cancel()
+		c.cmdResp, c.lastErr = c.client.CommandHandler(ctxx, &pb.SpeculateCommandHandlerRequest{})
+		return nil
+	})
+	ctx.Step(`^the speculative operation should fail with invalid argument error$`, func() error {
+		clientErr := angzarr.AsClientError(c.lastErr)
+		if clientErr == nil || !clientErr.IsInvalidArgument() {
+			return fmt.Errorf("expected an invalid-argument failure, got %v", c.lastErr)
+		}
+		return nil
+	})
+}
+
+func (c *SpeculativeClientContext) speculateProjector(string) error {
+	ctxx, cancel := c.ctx()
+	defer cancel()
+	c.projResp, c.lastErr = c.client.Projector(ctxx, &pb.SpeculateProjectorRequest{Events: c.trigger})
+	return nil
+}
+
+// thenStoreUnchanged asserts speculation left the recorded history exactly
+// as seeded.
+func (c *SpeculativeClientContext) thenStoreUnchanged() error {
+	if c.lastErr != nil {
+		return fmt.Errorf("speculation failed: %v", c.lastErr)
+	}
+	if c.domain == "" {
+		return nil // nothing was seeded; nothing to leak into
+	}
+	book := c.backend.recorded(c.domain, []byte(c.root))
+	if book == nil {
+		return nil
+	}
+	if uint32(len(book.GetPages())) != book.GetNextSequence() {
+		return fmt.Errorf("store mutated: %d pages vs next sequence %d", len(book.GetPages()), book.GetNextSequence())
+	}
+	return nil
 }
