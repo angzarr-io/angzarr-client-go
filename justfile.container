@@ -57,8 +57,11 @@ test: generate-proto
 coverage: generate-proto
     go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out
 
+# 60m outer ceiling: the engine-scoped ooze release (see mutation_test.go)
+# completes well inside it; the old 30m ceiling killed the unscoped run
+# mid-flight with no report.
 mutation-test: generate-proto
-    go test -v -tags=mutation -run TestMutation -count=1 -timeout 30m ./...
+    go test -v -tags=mutation -run TestMutation -count=1 -timeout 60m .
 
 # Format check (gofmt)
 fmt:
