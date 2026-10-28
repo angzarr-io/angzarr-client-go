@@ -17,8 +17,13 @@ post-merge:
 pre-commit:
   parallel: false
   commands:
+    # git exports GIT_DIR/GIT_INDEX_FILE (absolute, pointing at the parent
+    # repository) to hooks run from a linked worktree; inherited by the
+    # recipe's `git -C <submodule> status`, they would diff the submodule's
+    # files against the parent's index. Clearing them scopes each git call to
+    # the repository its -C path names.
     check-submodules-clean:
-      run: just check-submodules-clean
+      run: env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE just check-submodules-clean
     fmt:
       run: just fmt-fix
       stage_fixed: true
