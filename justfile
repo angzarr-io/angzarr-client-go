@@ -38,7 +38,15 @@ _container +ARGS:
         # (whose .git file points there) resolves inside the container;
         # safe.directory lets git read a checkout owned by another uid.
         git_common="$(git rev-parse --path-format=absolute --git-common-dir)"
-        docker run --rm --network=host \
+        # Rootless docker maps container uid 0 to the host user, so `-u 0:0`
+        # makes writes to the mounted checkout land as the host user; the
+        # image's default user maps to an unowned subuid there and cannot
+        # write it. Rootful docker keeps the image default.
+        user_flag=()
+        if [[ "$(docker info --format '{{{{json .SecurityOptions}}')" == *rootless* ]]; then
+            user_flag=(-u 0:0)
+        fi
+        docker run --rm --network=host "${user_flag[@]}" \
             -v "{{ROOT}}:/workspace:Z" \
             -v "${git_common}:${git_common}" \
             -e GIT_CONFIG_COUNT=1 \
