@@ -6,6 +6,8 @@
 
 Go client library for Angzarr event sourcing framework.
 
+> **Status: intentionally lagging.** This client is temporarily descoped: the project grew too fast in scope, so work is focused on the Rust and Python clients. It is behind the current angzarr stack and may not build against it. It will be brought back up to date once Rust and Python are fully operational.
+
 ## Installation
 
 ```bash
